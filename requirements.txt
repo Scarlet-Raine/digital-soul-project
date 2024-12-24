@@ -1,0 +1,5 @@
+google.generativeai
+google-auth-oauthlib
+json
+pyaudio
+SpeechRecognition

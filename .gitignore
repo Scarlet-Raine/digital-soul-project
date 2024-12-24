@@ -1,0 +1,82 @@
+# System and IDE files
+.DS_Store
+Thumbs.db
+
+# Python-specific files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Ignore temporary files
+*.tmp
+*.temp
+*.swp
+
+# Ignore Python virtual environments
+.venv/
+venv/
+
+# Ignore logs and debug files
+*.log
+*.debug
+/logs
+/weights
+
+# Ignore IDE configurations
+.vscode/
+.idea/
+
+# Ignore folders and files you specified
+GPT-SoVITS/
+Retrieval-based-Voice-Conversion-WebUI/
+client_secret.json
+/TEMP
+/assets/
+/runtime
+/rvc_cli/uvr
+/rvc_cli/rvc/models
+file_list.txt
+AI.code-workspace
+token.json
+client_secret1.json
+client_secret.json
+models/2BJP.pth
+models/2BJP.index
+rvc/models/embedders/contentvec/pytorch_model.bin
+StyleTTS2/Models/LibriTTS/epochs_2nd_00020.pth
+
+# Imported from huggingface.co/lj1995/VoiceConversionWebUI
+/pretrained
+/pretrained_v2
+/uvr5_weights
+
+# Ignore tools
+tools/
+
+# Imported from other sources
+hubert_base.pt
+rmvpe.onnx
+rmvpe.pt
+
+# Ignore audio output
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.pt
+*.exe
+*.cache
+audio/out/
+
+# Other tools
+.tool-versions
+ffmpeg.*
+ffprobe.*
+
+# Exclude large files
+/hubert_base.pt
+/rmvpe.pt
+StyleTTS2/Utils/ASR/epoch_*.pth
+hubert_base.pt
+rmvpe.pt
