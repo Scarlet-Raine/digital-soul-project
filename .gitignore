@@ -79,6 +79,8 @@ rmvpe.pt
 audio/
 *.ckpt
 *.pth
+*.gguf
+
 
 # Other tools
 .tool-versions
