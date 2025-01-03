@@ -16,6 +16,7 @@ __pycache__/
 # Ignore Python virtual environments
 .venv/
 venv/
+.huggingface
 
 # Ignore logs and debug files
 *.log
@@ -28,7 +29,6 @@ venv/
 .idea/
 
 # Ignore folders and files you specified
-GPT-SoVITS/
 Retrieval-based-Voice-Conversion-WebUI/
 client_secret.json
 /TEMP
@@ -45,6 +45,13 @@ models/2BJP.pth
 models/2BJP.index
 rvc/models/embedders/contentvec/pytorch_model.bin
 StyleTTS2/Models/LibriTTS/epochs_2nd_00020.pth
+GPT-SoVits/data
+GPT-SoVits/logs
+GPT-SoVits/TEMP
+GPT-SoVits/models
+GPT-SoVits/pretrained_models
+GPT-SoVits/training_data
+GPT-SoVits/GPT_SoVITS/pretrained_models
 
 # Imported from huggingface.co/lj1995/VoiceConversionWebUI
 /pretrained
@@ -68,6 +75,8 @@ rmvpe.pt
 *.exe
 *.cache
 audio/out/
+*.ckpt
+*.pth
 
 # Other tools
 .tool-versions
