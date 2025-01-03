@@ -45,13 +45,13 @@ models/2BJP.pth
 models/2BJP.index
 rvc/models/embedders/contentvec/pytorch_model.bin
 StyleTTS2/Models/LibriTTS/epochs_2nd_00020.pth
-GPT-SoVits/data
-GPT-SoVits/logs
-GPT-SoVits/TEMP
-GPT-SoVits/models
-GPT-SoVits/pretrained_models
-GPT-SoVits/training_data
-GPT-SoVits/GPT_SoVITS/pretrained_models
+GPT-SoVits/data/
+GPT-SoVits/logs/
+GPT-SoVits/TEMP/
+GPT-SoVits/models/
+GPT-SoVits/pretrained_models/
+GPT-SoVits/training_data/
+GPT-SoVits/GPT_SoVITS/pretrained_models/
 audio
 audio\training
 

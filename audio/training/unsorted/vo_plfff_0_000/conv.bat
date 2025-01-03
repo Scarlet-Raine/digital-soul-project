@@ -1,1 +1,0 @@
-for %%f in (*.wem) do "C:\Users\EVO\Downloads\vgmstream-win64\vgmstream-cli.exe" "%%f" -o "%%~nf.wav"
