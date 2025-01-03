@@ -41,6 +41,8 @@ The endgame goal is a digital simulation of the so called "human soul" ie emotio
     Pipeline: Connect these components in a pipeline to process the chatbot's response and generate the final emotional character voice output.
 
 *** CUDA/CPU ONLY ***
+
+
 Unfortunately I do not have the facilities for that big man, if you want to run this, it runs but most of the paths are hardcoded to my system user, so the only way this would work straight up is if your user is EVO/Documents/AI
 The only way is to run the files and fix the paths as it errors out ig.
 Key files:
