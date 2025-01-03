@@ -74,7 +74,7 @@ rmvpe.pt
 *.pt
 *.exe
 *.cache
-audio/out/
+audio/
 *.ckpt
 *.pth
 
