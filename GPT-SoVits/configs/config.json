@@ -1,0 +1,47 @@
+{
+    "train": {
+        "log_interval": 200,
+        "eval_interval": 1000,
+        "seed": 1234,
+        "epochs": 50000,
+        "learning_rate": 2e-4,
+        "betas": [0.8, 0.99],
+        "eps": 1e-9,
+        "batch_size": 8,
+        "fp16_run": true,
+        "lr_decay": 0.999875,
+        "segment_size": 32,
+        "init_lr_ratio": 1,
+        "warmup_epochs": 0,
+        "c_mel": 45,
+        "c_kl": 1.0,
+        "use_sr": true,
+        "max_speclen": 512,
+        "port": "8001",
+        "keep_ckpts": 3,
+        "num_workers": 4,
+        "log_version": 0
+    },
+    "data": {
+        "training_files": "data/2b/filelists/train.list",
+        "validation_files": "data/2b/filelists/val.list",
+        "max_wav_value": 32768.0,
+        "sampling_rate": 44100,
+        "filter_length": 2048,
+        "hop_length": 512,
+        "win_length": 2048,
+        "n_mel_channels": 80,
+        "mel_fmin": 0.0,
+        "mel_fmax": null
+    },
+    "model": {
+        "n_vocab": 1024,
+        "n_layer": 6,
+        "n_head": 8,
+        "n_embd": 512,
+        "ssl_dim": 768,
+        "residual_channels": 384,
+        "residual_layers": 20,
+        "use_spectral_norm": false
+    }
+}

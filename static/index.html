@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Voice Pipeline</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 50px auto;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background-color: #6200ea;
+            color: white;
+            text-align: center;
+            padding: 20px;
+            font-size: 1.5em;
+        }
+
+        .chat-log {
+            padding: 20px;
+            height: 400px;
+            overflow-y: scroll;
+            border-bottom: 1px solid #ccc;
+        }
+
+        .chat-log p {
+            margin: 10px 0;
+            line-height: 1.5;
+        }
+
+        .chat-log .user {
+            text-align: right;
+            color: #6200ea;
+        }
+
+        .chat-log .bot {
+            text-align: left;
+            color: #333;
+        }
+
+        .input-section {
+            display: flex;
+            padding: 20px;
+            background: #f9f9f9;
+        }
+
+        .input-section input[type="text"] {
+            flex: 1;
+            padding: 10px;
+            font-size: 1em;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .input-section button {
+            padding: 10px 20px;
+            margin-left: 10px;
+            font-size: 1em;
+            background-color: #6200ea;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .input-section button:hover {
+            background-color: #4e00ba;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">AI Voice Pipeline Interface</div>
+        <div class="chat-log" id="chatLog"></div>
+        <div class="input-section">
+            <input type="text" id="userInput" placeholder="Enter your query here...">
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <script>
+        const chatLog = document.getElementById('chatLog');
+        const userInput = document.getElementById('userInput');
+
+        function appendMessage(content, sender) {
+            const message = document.createElement('p');
+            message.className = sender;
+            message.textContent = content;
+            chatLog.appendChild(message);
+            chatLog.scrollTop = chatLog.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const input = userInput.value.trim();
+            if (!input) return;
+
+            appendMessage(input, 'user');
+            userInput.value = '';
+
+            try {
+                const response = await fetch('/process_text', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ text: input })
+                });
+
+                const data = await response.json();
+                if (data.error) {
+                    appendMessage(`Error: ${data.error}`, 'bot');
+                } else {
+                    appendMessage(data.response || 'Processing complete.', 'bot');
+                }
+            } catch (error) {
+                appendMessage('An error occurred. Please try again later.', 'bot');
+            }
+        }
+    </script>
+</body>
+</html>

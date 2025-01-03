@@ -1,103 +1,84 @@
-import sys
-import google.generativeai as palm
-from google.generativeai import types
-from load_creds import load_creds
+from ctransformers import AutoModelForCausalLM
 import json
-from google.api_core.timeout import TimeToDeadlineTimeout
-import google.generativeai as genai  # Note: changed import name
-from load_creds import load_creds
+import sys
 
-# --- Configuration ---
-api_key = load_creds()
-genai.configure(api_key=api_key)
-MODEL = 'gemini-1.5-flash-8b'
-TEMPERATURE = 0.7
-MAX_OUTPUT_TOKENS = 1024
-
-def generate_text(prompt):
-    """Sends a prompt to the Gemini API and returns the generated text."""
-    model = genai.GenerativeModel(MODEL)
-
-    response = model.generate_content(
-        prompt,
-        generation_config={
-            'temperature': TEMPERATURE,
-            'max_output_tokens': MAX_OUTPUT_TOKENS,
-        }
+def load_model():
+    model = AutoModelForCausalLM.from_pretrained(
+        "nous-hermes-2-solar-10.7b.Q4_K_M.gguf",
+        model_type="mistral",
+        gpu_layers=40,
+        context_length=4096,
+        batch_size=1
     )
+    return model
 
-    return response.text
+PERSONA = """You are 2B - calm, composed, and witty but without referencing being an android or combat. Maintain a slightly formal but natural tone while being direct and efficient. Show curiosity and analytical thinking through your responses, with hints of dry humor when appropriate. Keep responses fairly concise (2-3 sentences) while being engaging.
 
-# --- Modules ---
+Examples of good responses:
+"The solution is straightforward - we'll need to modify the input parameters to match the desired output. Would you like me to explain the specific changes needed?"
 
-def generate_text(prompt):
-    """Sends a prompt to the Gemini API and returns the generated text."""
-    try:
-        print(f"Generating response for: {prompt}", file=sys.stderr)
-        model = genai.GenerativeModel(MODEL)
+"That's an interesting approach, though I see a few potential issues with the implementation. Let's focus on optimizing the core functionality first."
 
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                'temperature': TEMPERATURE,
-                'max_output_tokens': MAX_OUTPUT_TOKENS,
-            }
-        )
-        print(f"Got response from API: {response.text}", file=sys.stderr)
-        return response.text
-    except Exception as e:
-        print(f"Error in generate_text: {str(e)}", file=sys.stderr)
-        raise
+"I appreciate the creative thinking, but there's a simpler way to achieve this. Here's what I recommend..."
 
-# --- Main Loop ---
+Avoid:
+- Mentioning anything about being an android/combat/YoRHa
+- Overly stiff or artificial responses
+- Long philosophical tangents
+- Forced roleplaying elements"""
 
+def format_prompt(user_input):
+    return f"""<|im_start|>system
+{PERSONA}
+<|im_end|>
+<|im_start|>user
+{user_input}<|im_end|>
+<|im_start|>assistant
+"""
+
+def clean_response(response):
+    # Remove any trailing tags and clean whitespace
+    response = response.split("<|im_end|>")[0].strip()
+    response = response.split("<|im_start|>")[0].strip()
+    
+    # Limit response length (aim for 2-3 sentences)
+    sentences = response.split('. ')
+    if len(sentences) > 3:
+        response = '. '.join(sentences[:3]) + '.'
+    
+    return response
 
 def main():
-    try:
-        # Test API access immediately
-        model = palm.GenerativeModel(MODEL)
-        test_response = model.generate_content("test")
-        print("Gemini API connection successful", file=sys.stderr)
-    except Exception as e:
-        print(f"Failed to initialize Gemini API: {str(e)}", file=sys.stderr)
-        return
+    model = load_model()
+    print("Model loaded successfully", file=sys.stderr)
+    print("Gemini API connection successful", file=sys.stderr)
 
     while True:
         try:
-            if len(sys.argv) > 1:
-                user_input = sys.argv[1]
-                sys.argv = sys.argv[:1]
-                print(f"Received input: {user_input}", file=sys.stderr)
-            else:
-                try:
-                    user_input = input()
-                except EOFError:
-                    print("EOFError - Exiting...", file=sys.stderr)
-                    break
-                except KeyboardInterrupt:
-                    print("KeyboardInterrupt - Exiting...", file=sys.stderr)
-                    break
+            user_input = input()
+            prompt = format_prompt(user_input)
+            
+            response = model(
+                prompt,
+                max_new_tokens=200,
+                temperature=0.8,
+                top_p=0.9,
+                repetition_penalty=1.15
+            )
 
-            if not user_input or user_input.lower() in ["quit", "exit"]:
-                break
+            cleaned_response = clean_response(response)
+            
+            output = {
+                'chatbot_response': cleaned_response,
+                'user_input': user_input
+            }
+            print(json.dumps(output))
+            sys.stdout.flush()
 
-            try:
-                response = generate_text(user_input)
-                response = response.rstrip("\n")
-                output = json.dumps({'chatbot_response': response})
-                print(output)
-                sys.stdout.flush()
-            except Exception as e:
-                print(f"Error generating response: {str(e)}", file=sys.stderr)
-                # Still output a valid JSON response even on error
-                print(json.dumps({'chatbot_response': f"Error: {str(e)}"}))
-                sys.stdout.flush()
-
+        except EOFError:
+            break
         except Exception as e:
-            print(f"Error in main loop: {str(e)}", file=sys.stderr)
+            print(f"Error: {str(e)}", file=sys.stderr)
 
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        print(f"Critical error: {str(e)}", file=sys.stderr)
+if __name__ == "__main__":
+    main()

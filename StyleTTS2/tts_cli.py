@@ -62,11 +62,17 @@ mean, std = -4, 4
 
 global_ref_s = None
 
+global_ref_s = None
+
 def get_ref_s():
     global global_ref_s
     if global_ref_s is None:
+        print("Computing style for first time...")
         with torch.no_grad():
             global_ref_s = compute_style('./voice/voice_2b_short.wav')
+        print("Style computed and cached.")
+    else:
+        print("Using cached style.")
     return global_ref_s
 
 
@@ -109,11 +115,11 @@ config = yaml.safe_load(open("Models/LibriTTS/config.yml"))
 # load pretrained ASR model
 ASR_config = config.get('ASR_config', False)
 ASR_path = config.get('ASR_path', False)
-text_aligner = load_ASR_models(ASR_path, ASR_config)
+text_aligner = load_ASR_models(ASR_path, ASR_config) # type: ignore
 
 # load pretrained F0 model
 F0_path = config.get('F0_path', False)
-pitch_extractor = load_F0_models(F0_path)
+pitch_extractor = load_F0_models(F0_path) # type: ignore
 
 # load BERT model
 from Utils.PLBERT.util import load_plbert
@@ -121,7 +127,7 @@ BERT_path = config.get('PLBERT_dir', False)
 plbert = load_plbert(BERT_path)
 
 model_params = recursive_munch(config['model_params'])
-model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+model = build_model(model_params, text_aligner, pitch_extractor, plbert) # type: ignore
 _ = [model[key].eval() for key in model]
 _ = [model[key].to(get_device()) for key in model]
 

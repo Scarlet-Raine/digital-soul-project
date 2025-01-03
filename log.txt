@@ -1,0 +1,53 @@
+PS C:\Users\EVO\Documents\AI> & c:/Users/EVO/Documents/AI/.venv/Scripts/python.exe c:/Users/EVO/Documents/AI/web.py
+Python path:
+- c:\Users\EVO\Documents\AI\GPT-SoVits
+- c:\Users\EVO\Documents\AI\GPT-SoVits\GPT_SoVITS
+- c:\Users\EVO\Documents\AI
+- C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.10_3.10.3056.0_x64__qbz5n2kfra8p0\python310.zip
+- C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.10_3.10.3056.0_x64__qbz5n2kfra8p0\DLLs
+- C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.10_3.10.3056.0_x64__qbz5n2kfra8p0\lib
+- C:\Users\EVO\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.10_qbz5n2kfra8p0
+- C:\Users\EVO\Documents\AI\.venv
+- C:\Users\EVO\Documents\AI\.venv\lib\site-packages
+- c:\users\evo\documents\ai\.venv\src\rvc
+- c:\users\evo\documents\ai\.venv\src\rvc-tts-pipe
+- C:\Users\EVO\Documents\AI\.venv\lib\site-packages\win32
+- C:\Users\EVO\Documents\AI\.venv\lib\site-packages\win32\lib
+- C:\Users\EVO\Documents\AI\.venv\lib\site-packages\Pythonwin
+Starting imports...
+Attempting direct imports...
+i18n loaded...
+TTS loaded...
+fall back to default t2s_weights_path: GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt
+fall back to default vits_weights_path: GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth
+fall back to default bert_base_path: GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large
+fall back to default cnhuhbert_base_path: GPT_SoVITS/pretrained_models/chinese-hubert-base
+---------------------------------------------TTS Config---------------------------------------------
+device              : cuda
+is_half             : True
+version             : v2
+t2s_weights_path    : GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt
+vits_weights_path   : GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth
+bert_base_path      : GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large
+cnhuhbert_base_path : GPT_SoVITS/pretrained_models/chinese-hubert-base
+----------------------------------------------------------------------------------------------------
+
+Loading Text2Semantic weights from GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt
+Traceback (most recent call last):
+  File "c:\Users\EVO\Documents\AI\web.py", line 33, in <module>
+    from inference_webui_fast import init_sovits_model, inference_fast
+  File "c:\Users\EVO\Documents\AI\GPT-SoVits\GPT_SoVITS\inference_webui_fast.py", line 111, in <module>
+    tts_pipeline = TTS(tts_config)
+  File "c:\Users\EVO\Documents\AI\GPT-SoVits\GPT_SoVITS\TTS_infer_pack\TTS.py", line 252, in __init__
+    self._init_models()
+  File "c:\Users\EVO\Documents\AI\GPT-SoVits\GPT_SoVITS\TTS_infer_pack\TTS.py", line 277, in _init_models
+    self.init_t2s_weights(self.configs.t2s_weights_path)
+  File "c:\Users\EVO\Documents\AI\GPT-SoVits\GPT_SoVITS\TTS_infer_pack\TTS.py", line 347, in init_t2s_weights
+    dict_s1 = torch.load(weights_path, map_location=self.configs.device)
+  File "C:\Users\EVO\Documents\AI\.venv\lib\site-packages\torch\serialization.py", line 1319, in load
+    with _open_file_like(f, "rb") as opened_file:
+  File "C:\Users\EVO\Documents\AI\.venv\lib\site-packages\torch\serialization.py", line 659, in _open_file_like
+    return _open_file(name_or_buffer, mode)
+  File "C:\Users\EVO\Documents\AI\.venv\lib\site-packages\torch\serialization.py", line 640, in __init__
+    super().__init__(open(name, mode))
+FileNotFoundError: [Errno 2] No such file or directory: 'GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt'

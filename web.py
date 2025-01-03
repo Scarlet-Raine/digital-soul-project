@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory, send_file
 from werkzeug.serving import is_running_from_reloader
 import json
 import subprocess
@@ -8,6 +8,10 @@ import queue
 import sys
 import signal
 import os
+from chat_logger import ChatLogger
+chat_logger = ChatLogger()
+from datetime import datetime
+
 
 import torch
 device = 'cpu'
@@ -28,8 +32,10 @@ app = Flask(__name__)
 gemini_process = None
 tts_process = None
 rvc_process = None
+response_counter = 0
 tts_initialized = threading.Event()
 shutdown_event = threading.Event()
+rvc_completed = threading.Event()  # Add this line
 
 # Global queues for inter-process communication
 gemini_queue = queue.Queue()
@@ -42,6 +48,14 @@ processes_ready = {
     'gemini': threading.Event(),
     'rvc': threading.Event()
 }
+
+# Add a message queue to store Gemini responses
+from collections import deque
+last_responses = deque(maxlen=100)
+
+# Add a callback function for Gemini responses
+def handle_gemini_response(response_text):
+    last_responses.append(response_text)
 
 # Signal handler for graceful shutdown
 def signal_handler(sig, frame):
@@ -105,6 +119,10 @@ def run_gemini_cli():
                         gemini_output = data.get('chatbot_response', '')
                         if gemini_output:
                             print(f"\033[95m[{time.strftime('%H:%M:%S')}] Gemini response: {gemini_output}\033[0m")
+                            # Add the audio filename to the log
+                            audio_filename = f"out_{time.strftime('%Y%m%d_%H%M%S')}_{response_counter}.wav"
+                            chat_logger.log_interaction(text_input, gemini_output, audio_filename)
+                            handle_gemini_response(gemini_output)
                             if processes_ready['tts'].is_set():
                                 tts_queue.put(gemini_output)
                                 print(f"\033[95m[{time.strftime('%H:%M:%S')}] Sent to TTS queue: {gemini_output}\033[0m")
@@ -239,6 +257,7 @@ def run_tts_cli():
 # RVC CLI Handler
 def run_rvc_cli():
     global rvc_process
+    global response_counter
     try:
         print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting RVC process...\033[0m")
         processes_ready['rvc'].set()
@@ -248,14 +267,28 @@ def run_rvc_cli():
             try:
                 input_filename = rvc_queue.get(timeout=1)
                 if input_filename:
-                    # Define tts_output here
+                    # Generate unique output filename using counter
+                    response_counter += 1
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    output_filename = f"out_{timestamp}_{response_counter}.wav"
+                    
                     tts_output = os.path.abspath(os.path.join(current_dir, "StyleTTS2", "result.wav"))
+                    output_path = os.path.join("audio", "out", output_filename)
+                    
+                    # Clean up previous output if it exists
+                    old_output = os.path.join("audio", "out", "out.wav")
+                    if os.path.exists(old_output):
+                        try:
+                            os.remove(old_output)
+                        except Exception as e:
+                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error cleaning up old audio: {e}\033[0m")
+
                     command = [
                         sys.executable,
                         os.path.join('rvc_cli', 'rvc_inf_cli.py'),
                         "infer",
                         "--input_path", tts_output,
-                        "--output_path", os.path.join("audio", "out", "out.wav"),
+                        "--output_path", output_path,
                         "--pth_path", os.path.join("models", "2BJP.pth"),
                         "--index_path", os.path.join("models", "2BJP.index"),
                         "--pitch", "0",
@@ -274,16 +307,21 @@ def run_rvc_cli():
                             check=True
                         )
                         
-                        # Print output and errors
                         if process.stdout:
                             print(f"\033[94m[{time.strftime('%H:%M:%S')}] RVC Output: {process.stdout}\033[0m")
                         if process.stderr:
                             print(f"\033[93m[{time.strftime('%H:%M:%S')}] RVC Stderr: {process.stderr}\033[0m")
                             
-                        # Verify file was created
-                        output_path = os.path.join("audio", "out", "out.wav")
+                        # Create symlink for latest output
+                        latest_output = os.path.join("audio", "out", "out.wav")
+                        if os.path.exists(latest_output):
+                            os.remove(latest_output)
+                        import shutil
+                        shutil.copy2(output_path, latest_output)
+                        
                         if os.path.exists(output_path):
                             print(f"\033[92m[{time.strftime('%H:%M:%S')}] RVC output file generated: {output_path}\033[0m")
+                            rvc_completed.set()
                         else:
                             print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC output file not found: {output_path}\033[0m")
                             
@@ -318,40 +356,66 @@ def check_status():
     })
 
 @app.route('/')
-def index():
-    return "AI Voice Pipeline Server"
+def serve_app():
+    chat_logger.start_new_conversation()
+    return send_from_directory('.', 'index.html')
+
+@app.route('/assets/<path:path>')
+def serve_assets(path):
+    return send_from_directory('assets', path)
 
 @app.route('/process_text', methods=['POST'])
 def process_text():
     try:
-        app.logger.debug("Received request on /process_text")
         text_input = request.form.get('text')
-        app.logger.debug(f"Received text input: {text_input}")
-        
         if not text_input:
             return jsonify({'error': 'No text provided'}), 400
             
-        print(f"\033[95m[{time.strftime('%H:%M:%S')}] Received web request: {text_input}\033[0m")
-        
         if not all_processes_ready():
-            print(f"\033[91m[{time.strftime('%H:%M:%S')}] Process readiness check failed: {processes_ready}\033[0m")
             return jsonify({
                 'error': 'System not ready', 
                 'status': {name: event.is_set() for name, event in processes_ready.items()}
             }), 503
             
-        # Start the pipeline by sending to Gemini
-        print(f"\033[95m[{time.strftime('%H:%M:%S')}] Sending to Gemini queue: {text_input}\033[0m")
         gemini_queue.put(text_input)
         
         return jsonify({
-            'status': 'success', 
-            'message': 'Text processing started',
-            'text': text_input
+            'status': 'success',
+            'message': 'Processing started'
         })
     except Exception as e:
-        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error processing request: {str(e)}\033[0m")
         return jsonify({'error': str(e)}), 500
+    
+@app.route('/get_audio')
+def get_audio():
+    timestamp = request.args.get('t', '')  # Get timestamp from query parameter
+    audio_path = os.path.join('audio', 'out', 'out.wav')
+    if os.path.exists(audio_path):
+        response = send_file(audio_path, mimetype='audio/wav')
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
+    return jsonify({'error': 'Audio not found'}), 404
+    
+# Add to clear the completion flag
+@app.route('/reset_rvc', methods=['POST'])
+def reset_rvc():
+    rvc_completed.clear()
+    return jsonify({'status': 'reset'})
+
+# Modify get_response to include RVC status
+@app.route('/get_response', methods=['GET'])
+def get_response():
+    if last_responses and rvc_completed.is_set():
+        return jsonify({
+            'response': last_responses[-1],
+            'audio_ready': True
+        })
+    return jsonify({
+        'response': None,
+        'audio_ready': False
+    })
     
 @app.route('/test_gemini', methods=['POST'])
 def test_gemini():
