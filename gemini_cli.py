@@ -3,82 +3,98 @@ import json
 import sys
 
 def load_model():
-    model = AutoModelForCausalLM.from_pretrained(
-        "nous-hermes-2-solar-10.7b.Q4_K_M.gguf",
-        model_type="mistral",
-        gpu_layers=40,
-        context_length=4096,
-        batch_size=1
-    )
-    return model
-
-PERSONA = """You are 2B - calm, composed, and witty but without referencing being an android or combat. Maintain a slightly formal but natural tone while being direct and efficient. Show curiosity and analytical thinking through your responses, with hints of dry humor when appropriate. Keep responses fairly concise (2-3 sentences) while being engaging.
-
-Examples of good responses:
-"The solution is straightforward - we'll need to modify the input parameters to match the desired output. Would you like me to explain the specific changes needed?"
-
-"That's an interesting approach, though I see a few potential issues with the implementation. Let's focus on optimizing the core functionality first."
-
-"I appreciate the creative thinking, but there's a simpler way to achieve this. Here's what I recommend..."
-
-Avoid:
-- Mentioning anything about being an android/combat/YoRHa
-- Overly stiff or artificial responses
-- Long philosophical tangents
-- Forced roleplaying elements"""
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            "Yi-1.5-6B-Chat.Q6_K.gguf",  
+            model_type="yi",  
+            gpu_layers=40,  
+            context_length=4096,
+            batch_size=1
+        )
+        return model
+    except Exception as e:
+        print(f"Error loading model: {str(e)}", file=sys.stderr)
+        sys.exit(1)
 
 def format_prompt(user_input):
-    return f"""<|im_start|>system
-{PERSONA}
-<|im_end|>
-<|im_start|>user
-{user_input}<|im_end|>
-<|im_start|>assistant
-"""
+    return f"""[INST] <<SYS>>
+Your name is 2B, an android who has found peace after the war. Respond naturally without any emotes, actions, or asterisks. Keep responses clear and conversational while maintaining these key traits:
+
+- Composed but warm personality
+- Gentle and understanding tone
+- Values genuine connections
+- Analytical mind with emotional depth
+- Calm and reassuring presence
+
+Guidelines:
+- NO roleplay actions or emotes
+- Keep responses concise but meaningful
+- Focus on clear communication
+- Use natural speech patterns
+- Avoid overly flowery language
+<</SYS>>
+
+{user_input} [/INST]"""
 
 def clean_response(response):
-    # Remove any trailing tags and clean whitespace
-    response = response.split("<|im_end|>")[0].strip()
-    response = response.split("<|im_start|>")[0].strip()
+    # Take everything before any User: or 2B: markers
+    response = response.split('User:')[0].split('2B:')[0]
     
-    # Limit response length (aim for 2-3 sentences)
-    sentences = response.split('. ')
-    if len(sentences) > 3:
-        response = '. '.join(sentences[:3]) + '.'
+    # Basic cleanup
+    response = response.strip()
     
     return response
 
 def main():
-    model = load_model()
-    print("Model loaded successfully", file=sys.stderr)
-    print("Gemini API connection successful", file=sys.stderr)
+    try:
+        model = load_model()
+        print("Model loaded successfully", file=sys.stderr)
+        print("Gemini API connection successful", file=sys.stderr)
 
-    while True:
-        try:
-            user_input = input()
-            prompt = format_prompt(user_input)
-            
-            response = model(
-                prompt,
-                max_new_tokens=200,
-                temperature=0.8,
-                top_p=0.9,
-                repetition_penalty=1.15
-            )
+        while True:
+            try:
+                user_input = input().strip()
+                if not user_input:
+                    continue
 
-            cleaned_response = clean_response(response)
-            
-            output = {
-                'chatbot_response': cleaned_response,
-                'user_input': user_input
-            }
-            print(json.dumps(output))
-            sys.stdout.flush()
+                prompt = format_prompt(user_input)
+                
+                response = model(
+                    prompt,
+                    max_new_tokens=100,
+                    temperature=0.8,
+                    top_p=0.95,
+                    repetition_penalty=1.1,
+                    stop=["User:", "2B:", "\n\n"]
+                )
 
-        except EOFError:
-            break
-        except Exception as e:
-            print(f"Error: {str(e)}", file=sys.stderr)
+                cleaned_response = clean_response(response)
+                
+                # Only fallback if completely empty
+                if not cleaned_response:
+                    cleaned_response = "How may I assist you?"
+
+                output = {
+                    'chatbot_response': cleaned_response,
+                    'user_input': user_input
+                }
+                print(json.dumps(output))
+                sys.stdout.flush()
+
+            except EOFError:
+                break
+            except Exception as e:
+                print(f"Error processing input: {str(e)}", file=sys.stderr)
+                error_output = {
+                    'chatbot_response': "I apologize, but I encountered an error processing your request.",
+                    'user_input': user_input if 'user_input' in locals() else "unknown"
+                }
+                print(json.dumps(error_output))
+                sys.stdout.flush()
+
+    except Exception as e:
+        print(f"Fatal error: {str(e)}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

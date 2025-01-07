@@ -39,6 +39,7 @@ from TTS_infer_pack.TextPreprocessor import TextPreprocessor
 language=os.environ.get("language","Auto")
 language=sys.argv[-1] if sys.argv[-1] in scan_language_list() else language
 i18n = I18nAuto(language=language)
+import json
 
 # configs/tts_infer.yaml
 """
@@ -648,6 +649,7 @@ class TTS:
     
     @torch.no_grad()
     def run(self, inputs:dict):
+        print("\033[95m[DEBUG TTS] Received inputs:", json.dumps(inputs, indent=2), "\033[0m")
         """
         Text to speech inference.
         
@@ -700,6 +702,15 @@ class TTS:
         actual_seed = set_seed(seed)
         parallel_infer = inputs.get("parallel_infer", True)
         repetition_penalty = inputs.get("repetition_penalty", 1.35)
+
+        print("\033[95m[DEBUG TTS] Extracted parameters:")
+        print(f"  top_k: {top_k}")
+        print(f"  top_p: {top_p}")
+        print(f"  temperature: {temperature}")
+        print(f"  repetition_penalty: {repetition_penalty}")
+        print(f"  split_bucket: {split_bucket}")
+        print(f"  speed_factor: {speed_factor}")
+        print("\033[0m")
 
         if parallel_infer:
             print(i18n("并行推理模式已开启"))
@@ -860,6 +871,26 @@ class TTS:
                 else:
                     prompt = self.prompt_cache["prompt_semantic"].expand(len(all_phoneme_ids), -1).to(self.configs.device)
 
+                print(f"\033[95m[DEBUG TTS] Pre-inference parameters being sent to t2s_model:")
+                if isinstance(all_phoneme_ids, list):
+                    print(f"  phoneme_ids: List of {len(all_phoneme_ids)} elements")
+                    if all_phoneme_ids:
+                        print(f"  First phoneme_id length: {len(all_phoneme_ids[0])}")
+                else:
+                    print(f"  phoneme_ids shape: {all_phoneme_ids.shape}")
+                
+                if isinstance(all_bert_features, list):
+                    print(f"  bert_features: List of {len(all_bert_features)} elements")
+                    if all_bert_features:
+                        print(f"  First bert_feature shape: {all_bert_features[0].shape}")
+                else:
+                    print(f"  bert_features shape: {all_bert_features.shape}")
+                
+                print(f"  early_stop_num: {self.configs.hz * self.configs.max_sec}")
+                print(f"  Passing parameters: top_k={top_k}, top_p={top_p}, temp={temperature}, rep_pen={repetition_penalty}")
+                print(f"  max_len: {max_len}")
+                print("\033[0m")
+
 
                 pred_semantic_list, idx_list = self.t2s_model.model.infer_panel(
                     all_phoneme_ids,
@@ -909,19 +940,34 @@ class TTS:
                     audio_frag_end_idx.insert(0, 0)
                     batch_audio_fragment= [_batch_audio_fragment[audio_frag_end_idx[i-1]:audio_frag_end_idx[i]] for i in range(1, len(audio_frag_end_idx))]
                 else:
-                # ## vits串行推理
+                    # ## vits串行推理
                     for i, idx in enumerate(idx_list):
                         phones = batch_phones[i].unsqueeze(0).to(self.configs.device)
                         _pred_semantic = (pred_semantic_list[i][-idx:].unsqueeze(0).unsqueeze(0))   # .unsqueeze(0)#mq要多unsqueeze一次
-                        audio_fragment =(self.vits_model.decode(
-                                _pred_semantic, phones, refer_audio_spec, speed=speed_factor
-                            ).detach()[0, 0, :])
-                        batch_audio_fragment.append(
-                            audio_fragment
-                        )  ###试试重建不带上prompt部分
+                        
+                        print(f"\033[95m[DEBUG TTS] Pre-VITS parameters:")
+                        print(f"  pred_semantic shape: {_pred_semantic.shape}")
+                        print(f"  speed_factor: {speed_factor}")
+                        print(f"  refer_audio_spec shapes: {[spec.shape for spec in refer_audio_spec]}")
+                        print("\033[0m")
 
-                t5 = ttime()
-                t_45 += t5 - t4
+                        try:
+                            audio_fragment = (self.vits_model.decode(
+                                    _pred_semantic, phones, refer_audio_spec, speed=speed_factor
+                                ).detach()[0, 0, :])
+                            
+                            print(f"\033[95m[DEBUG TTS] Post-VITS output:")
+                            print(f"  Audio shape: {audio_fragment.shape}")
+                            print(f"  Audio min/max: {audio_fragment.min():.3f}/{audio_fragment.max():.3f}")
+                            print("\033[0m")
+                            
+                            batch_audio_fragment.append(audio_fragment)  ###试试重建不带上prompt部分
+                        except Exception as e:
+                            print(f"\033[91m[DEBUG TTS] Error during processing: {str(e)}\033[0m")
+                            raise e
+
+                    t5 = ttime()
+                    t_45 += t5 - t4
                 if return_fragment:
                     print("%.3f\t%.3f\t%.3f\t%.3f" % (t1 - t0, t2 - t1, t4 - t3, t5 - t4))
                     yield self.audio_postprocess([batch_audio_fragment], 
@@ -952,6 +998,7 @@ class TTS:
                                                 split_bucket,
                                                 fragment_interval
                                                 )
+                                                
 
         except Exception as e:
             traceback.print_exc()

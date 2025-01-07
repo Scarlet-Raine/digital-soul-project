@@ -80,6 +80,33 @@
         .input-section button:hover {
             background-color: #4e00ba;
         }
+        .tuning-controls {
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+
+        .parameter {
+            display: flex;
+            align-items: center;
+            margin: 10px 0;
+        }
+
+        .parameter label {
+            width: 100px;
+            margin-right: 10px;
+        }
+
+        .parameter input {
+            flex: 1;
+        }
+
+        .parameter .value {
+            width: 50px;
+            text-align: right;
+            margin-left: 10px;
+        }
     </style>
 </head>
 <body>
@@ -89,6 +116,20 @@
         <div class="input-section">
             <input type="text" id="userInput" placeholder="Enter your query here...">
             <button onclick="sendMessage()">Send</button>
+            <div class="tuning-controls">
+                <h3>Voice Tuning</h3>
+                <div class="parameter">
+                    <label for="speed">Speed:</label>
+                    <input type="range" id="speed" min="0.5" max="2.0" step="0.1" value="1.0">
+                    <span class="value">1.0</span>
+                </div>
+                <div class="parameter">
+                    <label for="pitch">Pitch:</label>
+                    <input type="range" id="pitch" min="-12" max="12" step="1" value="0">
+                    <span class="value">0</span>
+                </div>
+                <!-- Add other parameters similarly -->
+            </div>
         </div>
     </div>
 
@@ -129,7 +170,43 @@
             } catch (error) {
                 appendMessage('An error occurred. Please try again later.', 'bot');
             }
+            function updateTuning(parameter, value) {
+            fetch('/update_tuning', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({[parameter]: value})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if(data.error) {
+                    console.error('Error updating parameter:', data.error);
+                }
+            });
         }
+
+            // Initialize controls with current values
+            fetch('/get_tuning')
+                .then(response => response.json())
+                .then(params => {
+                    Object.entries(params).forEach(([key, value]) => {
+                        const input = document.getElementById(key);
+                        if(input) {
+                            input.value = value;
+                            input.nextElementSibling.textContent = value;
+                        }
+                    });
+                });
+
+            // Add event listeners to controls
+            document.querySelectorAll('.tuning-controls input').forEach(input => {
+                input.addEventListener('change', (e) => {
+                    updateTuning(e.target.id, e.target.value);
+                    e.target.nextElementSibling.textContent = e.target.value;
+                });
+        });
+    }
     </script>
 </body>
 </html>

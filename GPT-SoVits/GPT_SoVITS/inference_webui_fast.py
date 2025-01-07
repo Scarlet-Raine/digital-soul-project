@@ -22,6 +22,7 @@ logging.getLogger("charset_normalizer").setLevel(logging.ERROR)
 logging.getLogger("torchaudio._extension").setLevel(logging.ERROR)
 import pdb
 import torch
+import json
 
 try:
     import gradio.analytics as analytics
@@ -125,7 +126,7 @@ def inference(text, text_lang,
               seed, keep_random, parallel_infer,
               repetition_penalty
               ):
-
+    print("\033[95m[DEBUG FAST] Raw input params before processing:", json.dumps(locals(), indent=2), "\033[0m")
     seed = -1 if keep_random else seed
     actual_seed = seed if seed not in [-1, "", None] else random.randrange(1 << 32)
     inputs={
@@ -148,6 +149,7 @@ def inference(text, text_lang,
         "parallel_infer": parallel_infer,
         "repetition_penalty": repetition_penalty,
     }
+    print("\033[95m[DEBUG FAST] Final processed inputs:", json.dumps(inputs, indent=2), "\033[0m")
     for item in tts_pipeline.run(inputs):
         yield item, actual_seed
         
