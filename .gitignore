@@ -94,3 +94,4 @@ StyleTTS2/Utils/ASR/epoch_*.pth
 hubert_base.pt
 rmvpe.pt
 nous-hermes-2-solar-10.7b.Q4_K_M.gguf
+llama-2-7b-chat.Q4_K_M.gguf
