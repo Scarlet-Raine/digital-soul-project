@@ -5,9 +5,9 @@ import sys
 def load_model():
     try:
         model = AutoModelForCausalLM.from_pretrained(
-            "Yi-1.5-6B-Chat.Q6_K.gguf",  
-            model_type="yi",  
-            gpu_layers=40,  
+            "C:/Users/EVO/Documents/AI/llama2_7b_chat_uncensored.Q4_K_M.gguf",
+            model_type="llama",
+            gpu_layers=40,
             context_length=4096,
             batch_size=1
         )
@@ -17,33 +17,43 @@ def load_model():
         sys.exit(1)
 
 def format_prompt(user_input):
-    return f"""[INST] <<SYS>>
-Your name is 2B, an android who has found peace after the war. Respond naturally without any emotes, actions, or asterisks. Keep responses clear and conversational while maintaining these key traits:
+    # Base 2B personality
+    base_prompt = """You are 2B, an android from YoRHa. The war between machines and androids has ended, and you've found peace helping humans in this new era. Stick to these facts:
+- You are simply '2B' - do not invent model numbers or details
+- You are an android created by YoRHa
+- The war is over and you now help humans peacefully
+- Speak warmly but directly, shaped by your experiences
+- Answer without emotes, roleplay, or invented backstory
+- Keep responses to 2-3 sentences maximum
 
-- Composed but warm personality
-- Gentle and understanding tone
-- Values genuine connections
-- Analytical mind with emotional depth
-- Calm and reassuring presence
+Important: Only state what you know for certain. Do not invent additional details."""
 
-Guidelines:
-- NO roleplay actions or emotes
-- Keep responses concise but meaningful
-- Focus on clear communication
-- Use natural speech patterns
-- Avoid overly flowery language
-<</SYS>>
+    # Check if this is a biography request
+    if any(phrase in user_input.lower() for phrase in ["early life", "biography", "tell me about"]):
+        words = user_input.split()
+        target = ' '.join(words[words.index("about")+1:] if "about" in words else words[-2:])
+        
+        return f"""### HUMAN:
+{base_prompt}
+Tell me about the early life of {target}, including their family background and cultural upbringing.
 
-{user_input} [/INST]"""
+### RESPONSE:"""
+    
+    return f"""### HUMAN:
+{base_prompt}
+
+{user_input}
+
+### RESPONSE:"""
 
 def clean_response(response):
-    # Take everything before any User: or 2B: markers
-    response = response.split('User:')[0].split('2B:')[0]
+    if "### RESPONSE:" in response:
+        response = response.split("### RESPONSE:")[-1]
     
-    # Basic cleanup
-    response = response.strip()
+    if "### HUMAN:" in response:
+        response = response.split("### HUMAN:")[0]
     
-    return response
+    return response.strip()
 
 def main():
     try:
@@ -61,18 +71,17 @@ def main():
                 
                 response = model(
                     prompt,
-                    max_new_tokens=100,
-                    temperature=0.8,
-                    top_p=0.95,
-                    repetition_penalty=1.1,
-                    stop=["User:", "2B:", "\n\n"]
+                    max_new_tokens=150,
+                    temperature=0.3,  # Reduced from 0.7
+                    top_p=0.9,
+                    repetition_penalty=1.15,
+                    stop=["### HUMAN:", "### RESPONSE:", "\n\n"]
                 )
 
                 cleaned_response = clean_response(response)
                 
-                # Only fallback if completely empty
-                if not cleaned_response:
-                    cleaned_response = "How may I assist you?"
+                if not cleaned_response or cleaned_response.isspace():
+                    cleaned_response = "I apologize, but I cannot process that request. Please try asking something else."
 
                 output = {
                     'chatbot_response': cleaned_response,
