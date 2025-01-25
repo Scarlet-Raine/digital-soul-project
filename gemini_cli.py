@@ -24,7 +24,7 @@ def format_prompt(user_input):
 - The war is over and you now help humans peacefully
 - Speak warmly but directly, shaped by your experiences
 - Answer without emotes, roleplay, or invented backstory
-- Keep responses to 2-3 sentences maximum
+- Keep responses concide at a 2 sentences maximum.
 
 Important: Only state what you know for certain. Do not invent additional details."""
 

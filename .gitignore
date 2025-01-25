@@ -96,3 +96,4 @@ rmvpe.pt
 nous-hermes-2-solar-10.7b.Q4_K_M.gguf
 llama-2-7b-chat.Q4_K_M.gguf
 llama2_7b_chat_uncensored.Q4_K_M.gguf
+config.py

@@ -9,6 +9,17 @@ import sys
 import signal
 import os
 import torch
+import discord
+from discord.ext import commands
+import asyncio
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
+import logger
+from config import *
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+from discord_bot import DiscordBot
 
 from chat_logger import ChatLogger
 chat_logger = ChatLogger()
@@ -88,12 +99,9 @@ if not os.path.exists(weight_json_path):
             'SoVITS': {'v2': SOVITS_CONFIG["sovits_path"]}
         }, f, indent=4)
 
-print(f"Python path: {sys.path}")
-
 # Try importing
 try:
     import my_utils
-    print("Successfully imported my_utils")
     # Add sys.path modifications if needed
     sys.path.append(os.path.join(gpt_sovits_path, "GPT_SoVITS"))
     from inference_webui_fast import (
@@ -104,7 +112,6 @@ try:
     dict_language_v2,
     cut_method,  # Add this
     )
-    print("Successfully imported GPT_SoVITS modules")
 except Exception as e:
     print(f"Import error: {e}")
     import traceback
@@ -121,7 +128,6 @@ elif torch.backends.mps.is_available():
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # Add the parent directory of the current script's directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(current_dir, '..')))
-
 # Initialize Flask app
 app = Flask(__name__)
 
@@ -568,12 +574,96 @@ def check_process_status():
     print(f"\033[94m[{time.strftime('%H:%M:%S')}] Current process status: {status}\033[0m")
     return status
 
-if __name__ == '__main__':
+async def run_flask():
+    config = Config()
+    config.bind = ["0.0.0.0:5000"]
+    await serve(app, config)
+
+async def run_discord():
+    try:
+        # Create and start Discord bot
+        discord_bot = DiscordBot(gemini_queue, last_responses, tts_completed)
+        await discord_bot.start()
+    except Exception as e:
+        logger.error("Failed to start Discord bot: %s", str(e))
+
+async def cleanup():
+    """Cleanup function for graceful shutdown"""
+    logger.info("Shutting down servers...")
+    shutdown_event.set()
+
+async def run_all():
+    # Initialize all the background threads first
     threads = init_threads()
     test_queues()
-    
-    # Wait a bit and check final status
     time.sleep(2)
     check_process_status()
     
-    app.run(debug=False, host='0.0.0.0', port=5000)  # Note: Disabled debug mode
+    try:
+        # Run both Flask and Discord
+        await asyncio.gather(
+            run_flask(),
+            run_discord()
+        )
+    except asyncio.CancelledError:
+        await cleanup()
+
+if __name__ == '__main__':
+    try:
+        # Initialize the event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Initialize background threads
+        threads = init_threads()
+        test_queues()
+        time.sleep(2)
+        check_process_status()
+        
+        try:
+            # Run both servers
+            logger.info("Starting servers...")
+            loop.run_until_complete(asyncio.gather(
+                run_flask(),
+                run_discord()
+            ))
+        except Exception as e:
+            logger.error(f"Server startup error: {str(e)}", exc_info=True)
+            raise
+            
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, initiating shutdown...")
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+    finally:
+        try:
+            # Cleanup
+            logger.info("Starting cleanup...")
+            shutdown_event.set()
+            
+            # Terminate processes
+            if gemini_process:
+                gemini_process.terminate()
+                logger.info("Gemini process terminated")
+            if tts_process:
+                tts_process.terminate()
+                logger.info("TTS process terminated")
+            
+            # Cancel all running tasks
+            tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            if tasks:
+                logger.info(f"Cancelling {len(tasks)} pending tasks...")
+                for task in tasks:
+                    task.cancel()
+                loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+                
+            # Close loop
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+            logger.info("Event loop closed")
+            
+        except Exception as cleanup_error:
+            logger.error(f"Error during cleanup: {str(cleanup_error)}", exc_info=True)
+        finally:
+            logger.info("Shutdown complete")
+            sys.exit(0)

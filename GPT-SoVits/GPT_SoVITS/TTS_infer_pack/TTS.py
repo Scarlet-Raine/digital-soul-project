@@ -11,9 +11,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, "../../"))
 sys.path.insert(0, project_root)
 
-# Debug statement to verify sys.path
-print("TTS.py sys.path:", sys.path)
-
 from tqdm import tqdm
 now_dir = os.getcwd()
 sys.path.append(now_dir)
