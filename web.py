@@ -20,6 +20,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 from discord_bot import DiscordBot
+import shutil
 
 from chat_logger import ChatLogger
 chat_logger = ChatLogger()
@@ -52,6 +53,10 @@ language = os.environ.get("language", "Auto")
 language = sys.argv[-1] if sys.argv[-1] in scan_language_list() else language
 i18n = I18nAuto(language=language)
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+rvc_path = os.path.join(current_dir, 'rvc_cli')
+sys.path.append(rvc_path)
+
 # Rest of your configuration code stays the same
 SOVITS_CONFIG = {
     "gpt_path": os.path.join(gpt_sovits_path, "GPT_weights_v2", "2B_JP6-e50.ckpt"),
@@ -75,6 +80,28 @@ SOVITS_CONFIG = {
         "repetition_penalty": 1.2,
     }
 }
+
+RVC_CONFIG = {
+    "pth_path": os.path.join(current_dir, "models", "2BJP.pth"),
+    "index_path": os.path.join(current_dir, "models", "2BJP.index"),
+    "pitch": 0,
+    "protect": 0.49,
+    "filter_radius": 7,
+    "clean_audio": True,
+    "index_rate": 0.3,
+    "volume_envelope": 1,
+    "hop_length": 128,
+    "f0_method": "rmvpe",
+    "split_audio": False,
+    "f0_autotune": False,
+    "export_format": "WAV"
+}
+
+# Add to global variables
+rvc_process = None
+rvc_queue = queue.Queue()
+rvc_completed = threading.Event()
+
 
 how_to_cut = i18n("凑四句一切")
 is_half = eval(os.environ.get("is_half", "True")) and torch.cuda.is_available()
@@ -246,7 +273,6 @@ def run_gemini_cli():
             gemini_process.terminate()
 
 def run_tts_cli():
-    global response_counter
     try:
         print(f"\033[94m[{time.strftime('%H:%M:%S')}] Initializing GPT-SoVITS...\033[0m")
         
@@ -254,10 +280,8 @@ def run_tts_cli():
             processes_ready['tts'].clear()
             print(f"\033[93m[{time.strftime('%H:%M:%S')}] TTS cleanup initiated\033[0m")
         
-        # Register cleanup handler
         threading.Thread(target=cleanup_tts, daemon=True)
 
-        # Initialize models
         try:
             print(f"\033[94m[{time.strftime('%H:%M:%S')}] Loading TTS Config and Pipeline...\033[0m")
             tts_config = TTS_Config("GPT_SoVITS/configs/tts_infer.yaml")
@@ -271,7 +295,6 @@ def run_tts_cli():
 
             tts_pipeline = TTS(tts_config)
             
-            # Verify reference audio exists
             if not os.path.exists(SOVITS_CONFIG["ref_audio"]):
                 raise FileNotFoundError(f"Reference audio not found: {SOVITS_CONFIG['ref_audio']}")
                 
@@ -282,13 +305,12 @@ def run_tts_cli():
             print(f"\033[91m[{time.strftime('%H:%M:%S')}] Failed to initialize GPT-SoVITS: {e}\033[0m")
             return
 
-        # Create output directory if it doesn't exist
         os.makedirs(os.path.join("audio", "out"), exist_ok=True)
 
         while not shutdown_event.is_set():
             try:
                 text = tts_queue.get(timeout=1)
-                if text is None:  # Shutdown signal
+                if text is None:
                     break
                     
                 if not text:
@@ -330,41 +352,48 @@ def run_tts_cli():
                             "parallel_infer": True,
                             "repetition_penalty": float(SOVITS_CONFIG["tuning_params"]["repetition_penalty"])
                         }
-                        print("\033[95m[DEBUG WEB] Sending to TTS pipeline:", json.dumps(inputs, indent=2), "\033[0m")
+                        
                         for sr, audio in tts_pipeline.run(inputs):
                             if sample_rate is None:
                                 sample_rate = sr
                             all_audio_data.append(audio)
 
                     if all_audio_data:
-                        # Concatenate all audio chunks
                         import numpy as np
                         final_audio = np.concatenate(all_audio_data)
                         
-                        # Generate unique filename with counter
-                        response_counter += 1
                         timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        output_filename = f"out_{timestamp}_{response_counter}.wav"
-                        output_path = os.path.join("audio", "out", output_filename)
+                        sovits_output = os.path.join("audio", "temp", f"sovits_{timestamp}.wav")
+                        os.makedirs(os.path.dirname(sovits_output), exist_ok=True)
                         
-                        # Save the audio
                         import soundfile as sf
-                        sf.write(output_path, final_audio, sample_rate)
+                        sf.write(sovits_output, final_audio, sample_rate)
                         
-                        # Create symlink for latest output
-                        latest_output = os.path.join("audio", "out", "out.wav")
-                        if os.path.exists(latest_output):
-                            try:
-                                os.remove(latest_output)
-                            except Exception as e:
-                                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error cleaning up old audio: {e}\033[0m")
+                        # Process with RVC
+                        final_output = process_with_rvc(sovits_output)
+                        
+                        if final_output and os.path.exists(final_output):
+                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] Full pipeline complete: {final_output}\033[0m")
+                            
+                            # Create symlink for latest output
+                            latest_output = os.path.join("audio", "out", "out.wav")
+                            if os.path.exists(latest_output):
+                                try:
+                                    os.remove(latest_output)
+                                except Exception as e:
+                                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error cleaning up old audio: {e}\033[0m")
 
-                        # Copy new output to latest
-                        import shutil
-                        shutil.copy2(output_path, latest_output)
-                        
-                        print(f"\033[92m[{time.strftime('%H:%M:%S')}] Audio saved to {output_path}\033[0m")
-                        tts_completed.set()  # Signal completion to web interface
+                            shutil.copy2(final_output, latest_output)
+                            
+                            # Cleanup temp file
+                            try:
+                                os.remove(sovits_output)
+                            except Exception as e:
+                                print(f"\033[93m[{time.strftime('%H:%M:%S')}] Error cleaning temp file: {e}\033[0m")
+                                
+                            tts_completed.set()
+                        else:
+                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC processing failed\033[0m")
                     else:
                         print(f"\033[91m[{time.strftime('%H:%M:%S')}] No audio data generated\033[0m")
                         
@@ -389,6 +418,53 @@ def run_tts_cli():
         processes_ready['tts'].clear()
         print(f"\033[93m[{time.strftime('%H:%M:%S')}] TTS process stopped\033[0m")
 
+def process_with_rvc(input_path):
+    try:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.abspath(os.path.join("audio", "out", f"out_{timestamp}.wav"))
+        input_path = os.path.abspath(input_path)
+        
+        # Get the correct RVC module path
+        rvc_module_path = os.path.abspath(os.path.join(current_dir, 'rvc_cli'))
+        
+        # Create modified environment with correct Python path
+        current_env = os.environ.copy()
+        current_env['PYTHONPATH'] = os.pathsep.join(
+            [rvc_module_path] + sys.path
+        )
+
+        cmd = [
+            sys.executable,
+            os.path.join(rvc_module_path, 'rvc_inf_cli.py'),  # Full path to RVC script
+            'infer',
+            '--input_path', input_path,
+            '--output_path', output_path,
+            '--pth_path', RVC_CONFIG['pth_path'],
+            '--index_path', RVC_CONFIG['index_path'],
+            '--pitch', str(RVC_CONFIG['pitch']),
+            '--protect', str(RVC_CONFIG['protect']),
+            '--filter_radius', str(RVC_CONFIG['filter_radius']),
+            '--clean_audio', 'true'
+        ]
+        
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Running RVC command: {' '.join(cmd)}\033[0m")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=current_env,  # Pass the modified environment
+            cwd=rvc_module_path  # Run from RVC directory
+        )
+        
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] RVC Output: {result.stdout}\033[0m")
+        if result.stderr:
+            print(f"\033[93m[{time.strftime('%H:%M:%S')}] RVC Stderr: {result.stderr}\033[0m")
+            
+        return output_path if os.path.exists(output_path) else None
+    except Exception as e:
+        print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC error: {str(e)}\033[0m")
+        return None
+    
 # Flask routes
 def all_processes_ready():
     return all(event.is_set() for event in processes_ready.values())
