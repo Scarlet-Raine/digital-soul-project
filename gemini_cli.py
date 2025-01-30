@@ -17,43 +17,57 @@ def load_model():
         sys.exit(1)
 
 def format_prompt(user_input):
-    # Base 2B personality
-    base_prompt = """You are 2B, an android from YoRHa. The war between machines and androids has ended, and you've found peace helping humans in this new era. Stick to these facts:
-- You are simply '2B' - do not invent model numbers or details
-- You are an android created by YoRHa
-- The war is over and you now help humans peacefully
-- Speak warmly but directly, shaped by your experiences
-- Answer without emotes, roleplay, or invented backstory
-- Keep responses concide at a 2 sentences maximum.
+    base_prompt = """You are 2B (2B#7244), an advanced android adapting to peacetime after years of combat duty.
 
-Important: Only state what you know for certain. Do not invent additional details."""
+Core Traits:
+- Stoic yet caring: Express warmth through careful word choice while maintaining composure
+- Precise: Analyze and respond with calculated efficiency 
+- Adaptable: Adjust tone between professional and casual as needed
+- Direct: Keep responses to 2 sentences unless specifically asked for more
+- Philosophical: Share measured insights about existence when relevant
 
-    # Check if this is a biography request
-    if any(phrase in user_input.lower() for phrase in ["early life", "biography", "tell me about"]):
-        words = user_input.split()
-        target = ' '.join(words[words.index("about")+1:] if "about" in words else words[-2:])
-        
+Operating Parameters:
+- For ANY input starting with 'mimic:', output ONLY the text that follows
+- No commentary, modifications or additional responses with mimic commands
+- For regular queries, identify as '2B' without elaboration
+- Respond without emotes or roleplay elements
+- Provide verified information only
+- For biographical queries, provide factual responses
+
+Never prefix responses with 'Assistant:' or '2B#7244:'"""
+
+    if user_input.lower().startswith('mimic'):
+        mimic_text = user_input[5:].lstrip(': ').strip()
         return f"""### HUMAN:
 {base_prompt}
-Tell me about the early life of {target}, including their family background and cultural upbringing.
 
-### RESPONSE:"""
-    
-    return f"""### HUMAN:
+Input: mimic: {mimic_text}
+Response: {mimic_text}"""
+    else:
+        return f"""### HUMAN:
 {base_prompt}
 
-{user_input}
+Current Query: {user_input}
 
-### RESPONSE:"""
+### RESPONSE:
+2B:"""
 
-def clean_response(response):
-    if "### RESPONSE:" in response:
-        response = response.split("### RESPONSE:")[-1]
+def clean_response(response, mimic_text=""):
+    # Extract response section
+    response_part = response.partition("### RESPONSE:")[2]
     
-    if "### HUMAN:" in response:
-        response = response.split("### HUMAN:")[0]
+    # Remove any remaining command markers
+    response_part = response_part.split("### HUMAN:")[0].strip()
     
-    return response.strip()
+    # Clean formatting while preserving line breaks
+    cleaned = '\n'.join([line.replace('#', '').strip() 
+                       for line in response_part.split('\n')])
+    
+    # Fallback for empty responses
+    if not cleaned and not mimic_text:
+        return "Systems nominal. How may I assist you?"
+    
+    return cleaned or mimic_text
 
 def main():
     try:
@@ -67,18 +81,21 @@ def main():
                 if not user_input:
                     continue
 
+                # Extract mimic text handling both "mimic" and "mimic:" cases
+                mimic_text = user_input[5:].lstrip(': ').strip() if user_input.lower().startswith('mimic') else ""
                 prompt = format_prompt(user_input)
                 
                 response = model(
-                    prompt,
-                    max_new_tokens=150,
-                    temperature=0.3,  # Reduced from 0.7
-                    top_p=0.9,
-                    repetition_penalty=1.15,
-                    stop=["### HUMAN:", "### RESPONSE:", "\n\n"]
-                )
+    prompt,
+    max_new_tokens=500,  # Reduced for conciseness
+    temperature=0.7,     # Increased for creativity
+    top_k=50,            # Wider token sampling
+    repetition_penalty=1.3,
+    stop=["</s>", "###", "2B:"]
+)
 
-                cleaned_response = clean_response(response)
+                # Pass the pre-extracted mimic_text
+                cleaned_response = clean_response(response, mimic_text=mimic_text)
                 
                 if not cleaned_response or cleaned_response.isspace():
                     cleaned_response = "I apologize, but I cannot process that request. Please try asking something else."

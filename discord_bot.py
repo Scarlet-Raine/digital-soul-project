@@ -85,7 +85,7 @@ class DiscordBot:
             current_length = len(self.last_responses)
             self.gemini_queue.put(content)
             
-            timeout = 30
+            timeout = 120
             start_time = asyncio.get_event_loop().time()
             
             while True:

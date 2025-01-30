@@ -4,6 +4,7 @@ import json
 import subprocess
 import time
 import threading
+from queue import Empty
 import queue
 import sys
 import signal
@@ -21,6 +22,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 from discord_bot import DiscordBot
 import shutil
+import time
+
 
 from chat_logger import ChatLogger
 chat_logger = ChatLogger()
@@ -61,7 +64,7 @@ sys.path.append(rvc_path)
 SOVITS_CONFIG = {
     "gpt_path": os.path.join(gpt_sovits_path, "GPT_weights_v2", "2B_JP6-e50.ckpt"),
     "sovits_path": os.path.join(gpt_sovits_path, "SoVITS_weights_v2", "2B_JP6_e25_s2450.pth"),
-    "ref_audio": os.path.join(current_dir, "audio", "reference", "2b_calm_trimm.wav"),
+    "ref_audio": os.path.join(current_dir, "audio", "reference", "2b_calm_trimm.wav"),  
     "cnhubert_base_path": os.path.join(gpt_sovits_path, "pretrained_models", "chinese-hubert-base"),
     "bert_path": os.path.join(gpt_sovits_path, "pretrained_models", "chinese-roberta-wwm-ext-large"),
     "ref_text": "薔薇の他にもたくさんある 百合や桜に涼らん月の涙",
@@ -73,8 +76,8 @@ SOVITS_CONFIG = {
         "top_k": 40,
         "top_p": 1.0,
         "temperature": 0.7,
-        "batch_size": 200,
-        "speed_factor": 0.85,
+        "batch_size": 100,
+        "speed_factor": 0.82,
         "fragment_interval": 0.01,
         "seed": 0,
         "repetition_penalty": 1.2,
@@ -89,13 +92,46 @@ RVC_CONFIG = {
     "filter_radius": 7,
     "clean_audio": True,
     "index_rate": 0.3,
-    "volume_envelope": 1,
+    "volume_envelope": 0.5,
     "hop_length": 128,
     "f0_method": "rmvpe",
     "split_audio": False,
     "f0_autotune": False,
-    "export_format": "WAV"
+    "f0_autotune_strength": 0.7,
+    "clean_strength": 0.7,
+    "export_format": "WAV",
+    "upscale_audio": False,
+    "f0_file": None,
+    "embedder_model": "contentvec"
 }
+
+
+processing_lock = threading.Lock()
+RVC_TIMEOUT = 25  # seconds
+audio_player = None
+
+def reset_audio_pipeline():
+    """Clean up audio resources and reset state"""
+    global rvc_queue, audio_player
+    print(f"\033[93m[{time.strftime('%H:%M:%S')}] Resetting audio pipeline...\033[0m")
+    
+    # Clear queues
+    while not rvc_queue.empty():
+        try:
+            rvc_queue.get_nowait()
+        except queue.Empty:
+            pass
+            
+    # Clean temp files
+    temp_dir = os.path.join("audio", "temp")
+    for f in os.listdir(temp_dir):
+        try:
+            os.remove(os.path.join(temp_dir, f))
+        except Exception as e:
+            print(f"\033[93m[{time.strftime('%H:%M:%S')}] Cleanup error: {e}\033[0m")
+
+    # Reset completion flags
+    tts_completed.clear()
 
 # Add to global variables
 rvc_process = None
@@ -178,7 +214,7 @@ startup_order = threading.Event()
 processes_ready = {
     'tts': threading.Event(),
     'gemini': threading.Event(),
-#    'rvc': threading.Event()
+    'rvc': threading.Event()
 }
 
 # Add a message queue to store Gemini responses
@@ -370,7 +406,34 @@ def run_tts_cli():
                         sf.write(sovits_output, final_audio, sample_rate)
                         
                         # Process with RVC
-                        final_output = process_with_rvc(sovits_output)
+                        rvc_queue.put(sovits_output)
+                        output = os.path.join("audio", "out", f"out_{timestamp}.wav")
+
+                        # Add timeout handling with cleanup
+                        start_time = time.time()
+                        rvc_success = False
+                        try:
+                            while not os.path.exists(output):
+                                if time.time() - start_time > 25:  # Reduced timeout
+                                    raise TimeoutError("RVC processing timeout")
+                                time.sleep(0.2)  # More frequent checks
+                            
+                            # Validate audio file
+                            if os.path.getsize(output) < 1024:
+                                raise ValueError("Invalid RVC output file size")
+                                
+                            final_output = output
+                            rvc_success = True
+
+                        except (TimeoutError, ValueError) as e:
+                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC Error: {str(e)} - Cleaning up...\033[0m")
+                            # Cleanup failed files
+                            for f in [sovits_output, output]:
+                                try:
+                                    if os.path.exists(f): os.remove(f)
+                                except Exception as e:
+                                    print(f"\033[93mCleanup error: {e}\033[0m")
+                            return
                         
                         if final_output and os.path.exists(final_output):
                             print(f"\033[92m[{time.strftime('%H:%M:%S')}] Full pipeline complete: {final_output}\033[0m")
@@ -418,52 +481,72 @@ def run_tts_cli():
         processes_ready['tts'].clear()
         print(f"\033[93m[{time.strftime('%H:%M:%S')}] TTS process stopped\033[0m")
 
-def process_with_rvc(input_path):
+def run_rvc_cli():
+    global rvc_process
     try:
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.abspath(os.path.join("audio", "out", f"out_{timestamp}.wav"))
-        input_path = os.path.abspath(input_path)
-        
-        # Get the correct RVC module path
-        rvc_module_path = os.path.abspath(os.path.join(current_dir, 'rvc_cli'))
-        
-        # Create modified environment with correct Python path
-        current_env = os.environ.copy()
-        current_env['PYTHONPATH'] = os.pathsep.join(
-            [rvc_module_path] + sys.path
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting RVC process...\033[0m")
+        rvc_process = subprocess.Popen(
+            [sys.executable, 'rvc_cli/rvc_inf_cli.py', 'server'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
         )
 
-        cmd = [
-            sys.executable,
-            os.path.join(rvc_module_path, 'rvc_inf_cli.py'),  # Full path to RVC script
-            'infer',
-            '--input_path', input_path,
-            '--output_path', output_path,
-            '--pth_path', RVC_CONFIG['pth_path'],
-            '--index_path', RVC_CONFIG['index_path'],
-            '--pitch', str(RVC_CONFIG['pitch']),
-            '--protect', str(RVC_CONFIG['protect']),
-            '--filter_radius', str(RVC_CONFIG['filter_radius']),
-            '--clean_audio', 'true'
-        ]
-        
-        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Running RVC command: {' '.join(cmd)}\033[0m")
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            env=current_env,  # Pass the modified environment
-            cwd=rvc_module_path  # Run from RVC directory
-        )
-        
-        print(f"\033[94m[{time.strftime('%H:%M:%S')}] RVC Output: {result.stdout}\033[0m")
-        if result.stderr:
-            print(f"\033[93m[{time.strftime('%H:%M:%S')}] RVC Stderr: {result.stderr}\033[0m")
-            
-        return output_path if os.path.exists(output_path) else None
-    except Exception as e:
-        print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC error: {str(e)}\033[0m")
-        return None
+        def monitor_stderr():
+            while not shutdown_event.is_set():
+                error = rvc_process.stderr.readline().strip()
+                if error:
+                    print(f"\033[93m[{time.strftime('%H:%M:%S')}] RVC stderr: {error}\033[0m")
+                    if "RVC Server Ready" in error:
+                        processes_ready['rvc'].set()
+
+        stderr_thread = threading.Thread(target=monitor_stderr, daemon=True)
+        stderr_thread.start()
+
+        while not shutdown_event.is_set():
+            try:
+                with processing_lock:
+                    input_file = rvc_queue.get(timeout=1)
+                    if input_file:
+                        # Send config first
+                        rvc_process.stdin.write(json.dumps(RVC_CONFIG) + '\n')
+                        rvc_process.stdin.flush()
+                        # Then send input file
+                        rvc_process.stdin.write(f"{input_file}\n")
+                        rvc_process.stdin.flush()
+                        
+                        # Add response timeout
+                        output = ""
+                        start_time = time.time()
+                        while True:
+                            if time.time() - start_time > RVC_TIMEOUT:
+                                raise TimeoutError("RVC response timeout")
+                            line = rvc_process.stdout.readline().strip()
+                            if line:
+                                output = line
+                                break
+                            time.sleep(0.1)
+                        
+                        print(f"\033[94m[{time.strftime('%H:%M:%S')}] RVC output: {output}\033[0m")
+
+            except queue.Empty:
+                continue
+            except TimeoutError as te:
+                print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC Timeout: {str(te)}\033[0m")
+                # Reset RVC process
+                rvc_process.terminate()
+                rvc_process = None
+                processes_ready['rvc'].clear()
+                run_rvc_cli()  # Restart RVC process
+            except Exception as e:
+                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Unexpected RVC error: {str(e)}\033[0m")
+                processes_ready['rvc'].clear()
+                run_rvc_cli()  # Restart RVC process
+
+    except Exception as outer_e:
+        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Critical RVC failure: {str(outer_e)}\033[0m")
     
 # Flask routes
 def all_processes_ready():
@@ -490,23 +573,26 @@ def serve_assets(path):
 @app.route('/process_text', methods=['POST'])
 def process_text():
     try:
-        text_input = request.form.get('text')
-        if not text_input:
-            return jsonify({'error': 'No text provided'}), 400
+        with processing_lock:
+            text_input = request.form.get('text')
+            if not text_input:
+                return jsonify({'error': 'No text provided'}), 400
+                
+            if not all_processes_ready():
+                return jsonify({
+                    'error': 'System not ready', 
+                    'status': {name: event.is_set() for name, event in processes_ready.items()}
+                }), 503
+                
+            gemini_queue.put(text_input)
             
-        if not all_processes_ready():
             return jsonify({
-                'error': 'System not ready', 
-                'status': {name: event.is_set() for name, event in processes_ready.items()}
-            }), 503
+                'status': 'success',
+                'message': 'Processing started'
+            })
             
-        gemini_queue.put(text_input)
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Processing started'
-        })
     except Exception as e:
+        reset_audio_pipeline()  # Cleanup on error
         return jsonify({'error': str(e)}), 500
     
 @app.route('/get_audio')
@@ -610,25 +696,25 @@ def init_threads():
         tts_thread.start()
         threads.append(tts_thread)
         
-        # Wait for TTS to start
         while not processes_ready['tts'].is_set():
             time.sleep(0.1)
             
         print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting other processes...\033[0m")
         gemini_thread = threading.Thread(target=run_gemini_cli, daemon=True)
-        gemini_thread.start()
-        threads.append(gemini_thread)
+        rvc_thread = threading.Thread(target=run_rvc_cli, daemon=True)
         
-        # Wait for all processes to be ready
+        gemini_thread.start()
+        rvc_thread.start()
+        threads.extend([gemini_thread, rvc_thread])
+        
         start_time = time.time()
         while not all(event.is_set() for event in processes_ready.values()):
-            if time.time() - start_time > 30:  # 30 second timeout
+            if time.time() - start_time > 45:
                 print("\033[91mTimeout waiting for processes to be ready\033[0m")
                 break
             time.sleep(0.1)
             
         startup_order.set()
-        
         return threads
 
 def test_queues():

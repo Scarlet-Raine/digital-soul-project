@@ -5,6 +5,7 @@ import argparse
 import subprocess
 from functools import lru_cache
 from distutils.util import strtobool
+import time
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -2329,6 +2330,28 @@ def parse_arguments():
 
     return parser.parse_args()
 
+def run_server():
+   config = json.loads(input().strip())  # Read config first
+   while True:
+       try:
+           input_file = input().strip() 
+           if input_file:
+               timestamp = time.strftime("%Y%m%d_%H%M%S")
+               output_path = os.path.join("audio", "out", f"out_{timestamp}.wav")
+               
+               result = run_infer_script(
+                   input_path=input_file,
+                   output_path=output_path,
+                   **config
+               )
+               print(f"Processed: {output_path}")
+               sys.stdout.flush()
+
+       except EOFError:
+           break
+       except Exception as e:
+           print(f"Error: {str(e)}", file=sys.stderr)
+           sys.stderr.flush()
 
 def main():
     if len(sys.argv) == 1:
@@ -2595,4 +2618,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "server":
+        print("RVC Server Ready", file=sys.stderr)
+        sys.stderr.flush()
+        run_server()
+    else:
+        main()
