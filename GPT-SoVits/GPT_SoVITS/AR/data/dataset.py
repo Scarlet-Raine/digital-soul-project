@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-
 version = os.environ.get('version',None)
 
 from text import cleaned_text_to_sequence
@@ -121,31 +120,6 @@ class Text2SemanticDataset(Dataset):
         print("semantic_data_len:", semantic_data_len)
         print("phoneme_data_len:", phoneme_data_len)
         print(self.semantic_data)
-        print("\nAnalyzing potentially problematic files:")
-        for i in range(semantic_data_len):
-            item_name = self.semantic_data.iloc[i,0]
-            semantic_str = self.semantic_data.iloc[i,1]
-            semantic_ids = [int(idx) for idx in semantic_str.split(" ")]
-            try:
-                phoneme, _, _ = self.phoneme_data[item_name]
-                phoneme_ids = cleaned_text_to_sequence(phoneme.split(" "), version)
-                ps_ratio = len(phoneme_ids) / (len(semantic_ids) / self.hz)
-                
-                # Only print if:
-                # 1. Extreme ratio
-                # 2. Very long sequences
-                # 3. Every 50th file
-                if (ps_ratio < 5 or ps_ratio > 20 or 
-                    len(semantic_ids) > 150 or 
-                    len(phoneme_ids) > 80 or
-                    i % 50 == 0):
-                    print(f"File {i}: {item_name}")
-                    print(f"  Semantic length: {len(semantic_ids)}")
-                    print(f"  Phoneme length: {len(phoneme_ids)}")
-                    print(f"  Phoneme/sec ratio: {ps_ratio:.2f}")
-
-            except Exception as e:
-                print(f"  Error processing {item_name}: {str(e)}")
         idx = 0
         num_not_in = 0
         num_deleted_bigger = 0
@@ -187,9 +161,7 @@ class Text2SemanticDataset(Dataset):
             if (
                 len(phoneme_ids) > self.max_sec * self.hz / 2.5
             ):  ###########2：改为恒定限制为semantic/2.5就行
-                print(f"Deleted {item_name} with phoneme/sec: {ps_ratio:.2f}")  # Add this line
                 num_deleted_ps += 1
-                print(f"Deleted {item_name} with phoneme/sec: {ps_ratio:.2f}")  # Add this line
                 continue
             # if len(semantic_ids) > 1000:###########3
             #     num_deleted_bigger += 1
@@ -200,10 +172,6 @@ class Text2SemanticDataset(Dataset):
             if (
                 ps_ratio > self.max_ps_ratio or ps_ratio < self.min_ps_ratio
             ):  ##########4#3~25#每秒多少个phone
-                print(f"Filtering out {item_name}:")
-                print(f"  Semantic length: {len(semantic_ids)}")
-                print(f"  Phoneme length: {len(phoneme_ids)}")
-                print(f"  Phoneme/sec ratio: {ps_ratio:.2f}")
                 num_deleted_ps += 1
                 # print(item_name)
                 continue

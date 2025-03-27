@@ -23,50 +23,99 @@ logger = logging.getLogger(__name__)
 from discord_bot import DiscordBot
 import shutil
 import time
+import nltk
+nltk.download('averaged_perceptron_tagger')
+nltk.download('cmudict')
+try:
+    nltk.download('cmudict')
+    nltk.download('averaged_perceptron_tagger')
+except Exception as e:
+    print(f"Failed to download NLTK resources: {e}")
 
-
-from chat_logger import ChatLogger
-chat_logger = ChatLogger()
-from datetime import datetime
+# Get absolute path of script directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
-gpt_sovits_path = os.path.join(current_dir, 'GPT-SoVits')
+
+# Setup path to GPT-SoVITS and its subdirectories
+gpt_sovits_path = os.path.join(current_dir, 'GPT-SoVITS')
+sys.path.insert(0, gpt_sovits_path)  # Add to Python path
+
+# Add GPT_SoVITS module directory to Python path
+gpt_sovits_module_path = os.path.join(gpt_sovits_path, 'GPT_SoVITS')
+sys.path.insert(0, gpt_sovits_module_path)
+
+# Add tools directory to Python path
 tools_path = os.path.join(gpt_sovits_path, 'tools')
-gpt_sovits_module = os.path.join(gpt_sovits_path, 'GPT_SoVITS')
+sys.path.insert(0, tools_path)
 
-# Clear any existing paths we might have added
-for p in list(sys.path):
-    if 'GPT-SoVits' in p:
-        sys.path.remove(p)
+# Add i18n directory to Python path
+i18n_path = os.path.join(tools_path, 'i18n')
+sys.path.insert(0, i18n_path)
 
-# Add paths in correct order for all imports
-paths_to_add = [
-    tools_path,              # For direct tool imports 
-    gpt_sovits_path,        # For package-style imports
-    gpt_sovits_module,      # For GPT_SoVITS module imports
-]
+# Now import modules with proper namespace
+try:
+    # First try direct imports from current sys.path
+    from TTS_infer_pack.text_segmentation_method import get_method
+    from inference_webui_fast import dict_language, cut_method
+except ImportError:
+    # If that fails, try with GPT_SoVITS namespace
+    try:
+        import GPT_SoVITS.TTS_infer_pack.text_segmentation_method
+        import GPT_SoVITS.inference_webui_fast
+        
+        # Create references for easier access
+        get_method = GPT_SoVITS.TTS_infer_pack.text_segmentation_method.get_method
+        dict_language = GPT_SoVITS.inference_webui_fast.dict_language
+        cut_method = GPT_SoVITS.inference_webui_fast.cut_method
+    except ImportError as e:
+        print(f"Critical import error: {e}")
+        print("Python path:", sys.path)
 
-for path in paths_to_add:
-    if path not in sys.path:
-        sys.path.insert(0, path)
+# Import i18n
+try:
+    from i18n.i18n import I18nAuto, scan_language_list
+except ImportError:
+    try:
+        from tools.i18n.i18n import I18nAuto, scan_language_list
+    except ImportError as e:
+        print(f"Failed to import i18n: {e}")
+        print("sys.path:", sys.path)
 
-# Now your imports should work
-from tools.i18n.i18n import I18nAuto, scan_language_list
-
+# Set up i18n
 language = os.environ.get("language", "Auto")
-language = sys.argv[-1] if sys.argv[-1] in scan_language_list() else language
+language = sys.argv[-1] if len(sys.argv) > 1 and sys.argv[-1] in scan_language_list() else language
 i18n = I18nAuto(language=language)
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
+# Add RVC path
 rvc_path = os.path.join(current_dir, 'rvc_cli')
 sys.path.append(rvc_path)
+
+# Create a helper function for imports
+def safe_import(module_path, fallback_path=None, as_name=None):
+    try:
+        module = __import__(module_path, fromlist=[''])
+        if as_name:
+            globals()[as_name] = module
+        return module
+    except ImportError as e:
+        if fallback_path:
+            try:
+                module = __import__(fallback_path, fromlist=[''])
+                if as_name:
+                    globals()[as_name] = module
+                return module
+            except ImportError as e2:
+                print(f"Failed to import {module_path} or {fallback_path}: {e2}")
+        else:
+            print(f"Failed to import {module_path}: {e}")
+        return None
 
 # Rest of your configuration code stays the same
 SOVITS_CONFIG = {
     "gpt_path": os.path.join(gpt_sovits_path, "GPT_weights_v2", "2B_JP6-e50.ckpt"),
     "sovits_path": os.path.join(gpt_sovits_path, "SoVITS_weights_v2", "2B_JP6_e25_s2450.pth"),
     "ref_audio": os.path.join(current_dir, "audio", "reference", "2b_calm_trimm.wav"),  
-    "cnhubert_base_path": os.path.join(gpt_sovits_path, "pretrained_models", "chinese-hubert-base"),
-    "bert_path": os.path.join(gpt_sovits_path, "pretrained_models", "chinese-roberta-wwm-ext-large"),
+    "cnhubert_base_path": os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "chinese-hubert-base"),  # Corrected path
+    "bert_path": "hfl/chinese-roberta-wwm-ext-large",  # This can stay
     "ref_text": "薔薇の他にもたくさんある 百合や桜に涼らん月の涙",
     "ref_language": i18n("日文"),
     "output_language": i18n("英文"),
@@ -164,9 +213,18 @@ if not os.path.exists(weight_json_path):
 
 # Try importing
 try:
-    import my_utils
-    # Add sys.path modifications if needed
-    sys.path.append(os.path.join(gpt_sovits_path, "GPT_SoVITS"))
+    # First ensure tools directory is in the path
+    if tools_path not in sys.path:
+        sys.path.append(tools_path)
+    
+    # Now try to import my_utils from tools
+    from tools.my_utils import *
+    
+    # Add GPT_SoVITS to the path for inference_webui_fast
+    gpt_sovits_module = os.path.join(gpt_sovits_path, "GPT_SoVITS")
+    if gpt_sovits_module not in sys.path:
+        sys.path.append(gpt_sovits_module)
+        
     from inference_webui_fast import (
     TTS, 
     TTS_Config, 
@@ -187,6 +245,28 @@ if torch.cuda.is_available():
 elif torch.backends.mps.is_available():
     device = 'cpu'
 
+# Add a simple chat logger class
+class ChatLogger:
+    def __init__(self):
+        self.conversation_id = 0
+        os.makedirs('logs', exist_ok=True)
+        
+    def start_new_conversation(self):
+        self.conversation_id += 1
+        
+    def log_interaction(self, user_input, response, audio_file=None):
+        try:
+            with open(f'logs/conversation_{self.conversation_id}.log', 'a', encoding='utf-8') as f:
+                timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                f.write(f"[{timestamp}] USER: {user_input}\n")
+                f.write(f"[{timestamp}] BOT: {response}\n")
+                if audio_file:
+                    f.write(f"[{timestamp}] AUDIO: {audio_file}\n")
+                f.write("-" * 80 + "\n")
+        except Exception as e:
+            print(f"\033[91m[{time.strftime('%H:%M:%S')}] Logging error: {str(e)}\033[0m")
+
+
 # Get the absolute path of the current script's directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # Add the parent directory of the current script's directory to sys.path
@@ -194,6 +274,7 @@ sys.path.append(os.path.abspath(os.path.join(current_dir, '..')))
 # Initialize Flask app
 app = Flask(__name__)
 
+chat_logger = ChatLogger()
 # Global process variables
 gemini_process = None
 tts_process = None
@@ -245,10 +326,11 @@ def run_gemini_cli():
     global gemini_process
     try:
         print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting Gemini process...\033[0m")
+        gemini_script_path = os.path.join(current_dir, 'gemini_cli.py')
         gemini_process = subprocess.Popen(
-            [sys.executable, 'gemini_cli.py'],
+            [sys.executable, gemini_script_path],
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1
@@ -320,15 +402,83 @@ def run_tts_cli():
 
         try:
             print(f"\033[94m[{time.strftime('%H:%M:%S')}] Loading TTS Config and Pipeline...\033[0m")
-            tts_config = TTS_Config("GPT_SoVITS/configs/tts_infer.yaml")
+            
+            # Create output directories if they don't exist
+            os.makedirs(os.path.join("audio", "out"), exist_ok=True)
+            os.makedirs(os.path.join("audio", "temp"), exist_ok=True)
+            
+            # Import directly using absolute path
+            sys.path.insert(0, gpt_sovits_module_path)
+            
+            # First, dynamically import our required modules using absolute imports
+            TTS_module = safe_import('TTS_infer_pack.TTS', 'GPT_SoVITS.TTS_infer_pack.TTS')
+            if not TTS_module:
+                raise ImportError("Could not import TTS module")
+                
+            TTS = TTS_module.TTS
+            TTS_Config = TTS_module.TTS_Config
+            
+            # Get text cleaner
+            cleaner_module = safe_import('text.cleaner', 'GPT_SoVITS.text.cleaner')
+            if cleaner_module:
+                clean_text = cleaner_module.clean_text
+            
+            # Get segmentation method
+            seg_module = safe_import('TTS_infer_pack.text_segmentation_method', 
+                                     'GPT_SoVITS.TTS_infer_pack.text_segmentation_method')
+            if seg_module:
+                get_method = seg_module.get_method
+
+            # Initialize TTS config
+# Create output directories if they don't exist
+            os.makedirs(os.path.join("audio", "out"), exist_ok=True)
+            os.makedirs(os.path.join("audio", "temp"), exist_ok=True)
+            
+            # Initialize TTS config
+            config_path = os.path.join(gpt_sovits_module_path, "configs", "tts_infer.yaml")
+            if not os.path.exists(config_path):
+                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Config file not found: {config_path}\033[0m")
+                return
+                
+            tts_config = TTS_Config(config_path)
             tts_config.device = device
             tts_config.is_half = is_half
             tts_config.version = version
             tts_config.t2s_weights_path = SOVITS_CONFIG["gpt_path"]
             tts_config.vits_weights_path = SOVITS_CONFIG["sovits_path"]
-            tts_config.cnhuhbert_base_path = SOVITS_CONFIG["cnhubert_base_path"]
-            tts_config.bert_base_path = SOVITS_CONFIG["bert_path"]
+            
+            # Set the correct paths for models
+            tts_config.bert_base_path = "hfl/chinese-roberta-wwm-ext-large"  # HF model ID
+            tts_config.cnhuhbert_base_path = SOVITS_CONFIG["cnhubert_base_path"]  # Corrected local path
 
+            # Verify the path exists before proceeding
+            hubert_path = SOVITS_CONFIG["cnhubert_base_path"]
+            if not os.path.exists(hubert_path):
+                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Critical: CNHuBERT path does not exist: {hubert_path}\033[0m")
+                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Checking if pytorch_model.bin exists: {os.path.join(hubert_path, 'pytorch_model.bin')}\033[0m")
+                return
+            # Verify all model files exist for local files
+            for key in ["t2s_weights_path", "vits_weights_path"]:
+                path = getattr(tts_config, key)
+                if not os.path.exists(path):
+                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] Model file not found: {path}\033[0m")
+                    return
+
+            print(f"\033[92m[{time.strftime('%H:%M:%S')}] Creating TTS pipeline with config: {tts_config}\033[0m")
+            
+            # Import dictionary mapping for languages - get them directly from modules
+            get_method = seg_module.get_method if seg_module else None
+            
+            # Import dict_language
+            webui_module = safe_import('inference_webui_fast', 'GPT_SoVITS.inference_webui_fast')
+            if webui_module:
+                dict_language = webui_module.dict_language
+                cut_method = webui_module.cut_method  # Get cut_method from webui_module
+            else:
+                dict_language = None
+                cut_method = None
+            
+            # Create the TTS pipeline
             tts_pipeline = TTS(tts_config)
             
             if not os.path.exists(SOVITS_CONFIG["ref_audio"]):
@@ -339,6 +489,8 @@ def run_tts_cli():
             
         except Exception as e:
             print(f"\033[91m[{time.strftime('%H:%M:%S')}] Failed to initialize GPT-SoVITS: {e}\033[0m")
+            import traceback
+            traceback.print_exc()
             return
 
         os.makedirs(os.path.join("audio", "out"), exist_ok=True)
@@ -485,8 +637,9 @@ def run_rvc_cli():
     global rvc_process
     try:
         print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting RVC process...\033[0m")
+        rvc_script_path = os.path.join(current_dir, 'rvc_cli', 'rvc_inf_cli.py')
         rvc_process = subprocess.Popen(
-            [sys.executable, 'rvc_cli/rvc_inf_cli.py', 'server'],
+            [sys.executable, rvc_script_path, 'server'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE,
@@ -737,9 +890,18 @@ def check_process_status():
     return status
 
 async def run_flask():
-    config = Config()
-    config.bind = ["0.0.0.0:5000"]
-    await serve(app, config)
+    # Run Flask in a separate thread to not block the event loop
+    def run_app():
+        app.run(host='0.0.0.0', port=5000, debug=False)
+    
+    # Start Flask in a thread
+    flask_thread = threading.Thread(target=run_app)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Keep the async function running
+    while True:
+        await asyncio.sleep(1)
 
 async def run_discord():
     try:

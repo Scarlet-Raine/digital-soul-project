@@ -9,9 +9,27 @@
 import random
 import os, re, logging
 import sys
+# Get absolute path of script directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)  # Move up one level
+
+# Set working directory
+os.chdir(parent_dir)
+print("Current Working Directory:", os.getcwd())
+
+# Add GPT_SoVITS to path
+gpt_sovits_dir = os.path.join(parent_dir, "GPT_SoVITS")
+sys.path.insert(0, gpt_sovits_dir)
+
+# Add current directory to path
 now_dir = os.getcwd()
-sys.path.append(now_dir)
-sys.path.append("%s/GPT_SoVITS" % (now_dir))
+sys.path.insert(0, now_dir)
+
+from utils import HParams
+from torch.serialization import add_safe_globals
+
+# Add required classes to safe globals
+add_safe_globals([HParams])
 
 logging.getLogger("markdown_it").setLevel(logging.ERROR)
 logging.getLogger("urllib3").setLevel(logging.ERROR)
@@ -22,13 +40,11 @@ logging.getLogger("charset_normalizer").setLevel(logging.ERROR)
 logging.getLogger("torchaudio._extension").setLevel(logging.ERROR)
 import pdb
 import torch
-import json
 
 try:
     import gradio.analytics as analytics
     analytics.version_check = lambda:None
 except:...
-
 
 infer_ttswebui = os.environ.get("infer_ttswebui", 9872)
 infer_ttswebui = int(infer_ttswebui)
@@ -43,6 +59,12 @@ sovits_path = os.environ.get("sovits_path", None)
 cnhubert_base_path = os.environ.get("cnhubert_base_path", None)
 bert_path = os.environ.get("bert_path", None)
 version=os.environ.get("version","v2")
+
+from utils import HParams
+from torch.serialization import add_safe_globals
+
+# Add required classes to safe globals
+add_safe_globals([HParams])
         
 import gradio as gr
 from TTS_infer_pack.TTS import TTS, TTS_Config
@@ -126,7 +148,7 @@ def inference(text, text_lang,
               seed, keep_random, parallel_infer,
               repetition_penalty
               ):
-    print("\033[95m[DEBUG FAST] Raw input params before processing:", json.dumps(locals(), indent=2), "\033[0m")
+
     seed = -1 if keep_random else seed
     actual_seed = seed if seed not in [-1, "", None] else random.randrange(1 << 32)
     inputs={
@@ -149,7 +171,6 @@ def inference(text, text_lang,
         "parallel_infer": parallel_infer,
         "repetition_penalty": repetition_penalty,
     }
-    print("\033[95m[DEBUG FAST] Final processed inputs:", json.dumps(inputs, indent=2), "\033[0m")
     for item in tts_pipeline.run(inputs):
         yield item, actual_seed
         

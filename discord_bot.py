@@ -16,7 +16,7 @@ import glob
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-from config import DISCORD_TOKEN
+from cfg import DISCORD_TOKEN
 os.environ['DISCORD_TOKEN'] = DISCORD_TOKEN
 
 class DiscordBot:

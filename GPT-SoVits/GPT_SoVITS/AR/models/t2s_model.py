@@ -145,45 +145,21 @@ class T2SBlock:
         else:
             attn = scaled_dot_product_attention(q, k, v, attn_mask)
 
-        attn = attn.permute(2, 0, 1, 3).reshape(batch_size*q_len, self.hidden_dim)
-        attn = attn.view(q_len, batch_size, self.hidden_dim).transpose(1, 0)
+        attn = attn.transpose(1, 2).reshape(batch_size, q_len, -1)
         attn = F.linear(self.to_mask(attn, padding_mask), self.out_w, self.out_b)
 
-        if padding_mask is not None:
-            for i in range(batch_size):
-                # mask = padding_mask[i,:,0]
-                if self.false.device!= padding_mask.device:
-                    self.false = self.false.to(padding_mask.device)
-                idx = torch.where(padding_mask[i,:,0]==self.false)[0]
-                x_item = x[i,idx,:].unsqueeze(0)
-                attn_item = attn[i,idx,:].unsqueeze(0)
-                x_item = x_item + attn_item
-                x_item = F.layer_norm(
-                    x_item, [self.hidden_dim], self.norm_w1, self.norm_b1, self.norm_eps1
-                )
-                x_item = x_item + self.mlp.forward(x_item)
-                x_item = F.layer_norm(
-                    x_item,
-                    [self.hidden_dim],
-                    self.norm_w2,
-                    self.norm_b2,
-                    self.norm_eps2,
-                )
-                x[i,idx,:] = x_item.squeeze(0)
-            x = self.to_mask(x, padding_mask)
-        else:
-            x = x + attn
-            x = F.layer_norm(
-                x, [self.hidden_dim], self.norm_w1, self.norm_b1, self.norm_eps1
-            )
-            x = x + self.mlp.forward(x)
-            x = F.layer_norm(
-                x,
-                [self.hidden_dim],
-                self.norm_w2,
-                self.norm_b2,
-                self.norm_eps2,
-            )
+        x = x + attn
+        x = F.layer_norm(
+            x, [self.hidden_dim], self.norm_w1, self.norm_b1, self.norm_eps1
+        )
+        x = x + self.mlp.forward(x)
+        x = F.layer_norm(
+            x,
+            [self.hidden_dim],
+            self.norm_w2,
+            self.norm_b2,
+            self.norm_eps2,
+        )
         return x, k_cache, v_cache
     
     def decode_next_token(self, x:torch.Tensor, k_cache:torch.Tensor, v_cache:torch.Tensor, attn_mask:Optional[torch.Tensor]=None, torch_sdpa:bool=True):
@@ -206,8 +182,7 @@ class T2SBlock:
         else:
             attn = scaled_dot_product_attention(q, k, v, attn_mask)
 
-        attn = attn.permute(2, 0, 1, 3).reshape(batch_size*q_len, self.hidden_dim)
-        attn = attn.view(q_len, batch_size, self.hidden_dim).transpose(1, 0)
+        attn = attn.transpose(1, 2).reshape(batch_size, q_len, -1)
         attn = F.linear(attn, self.out_w, self.out_b)
 
         x = x + attn
@@ -424,7 +399,6 @@ class Text2SemanticDecoder(nn.Module):
         # loss
         # from feiteng: 每次 duration 越多, 梯度更新也应该更多, 所以用 sum
 
-
         loss_1 = F.cross_entropy(logits.permute(0, 2, 1), targets, reduction="sum")
         acc = self.ar_accuracy_metric(logits.permute(0, 2, 1).detach(), targets).item()
 
@@ -490,23 +464,11 @@ class Text2SemanticDecoder(nn.Module):
             (xy_pos, None),
             mask=xy_attn_mask,
         )
-        logits = self.ar_predict_layer(xy_dec[:, x_len:])  # Don't permute here
-        # print("Pre-permute logits shape:", logits.shape)
-        
-        # Reshape for loss and accuracy
-        logits_for_loss = logits.permute(0, 2, 1)  # [batch, vocab_size, seq_len]
-        # print("Loss logits shape:", logits_for_loss.shape)
-        # print("Targets shape:", targets.shape)
-        
-        loss = F.cross_entropy(logits_for_loss, targets, reduction="sum")
-        
-        # For accuracy, reshape logits to [batch*seq_len, vocab_size]
-        logits_for_acc = logits.reshape(-1, logits.size(-1))
-        targets_for_acc = targets.reshape(-1)
-        # print("Accuracy logits shape:", logits_for_acc.shape)
-        # print("Accuracy targets shape:", targets_for_acc.shape)
-        
-        acc = self.ar_accuracy_metric(logits_for_acc.detach(), targets_for_acc).item()
+        logits = self.ar_predict_layer(xy_dec[:, x_len:]).permute(0, 2, 1)
+        # loss
+        # from feiteng: 每次 duration 越多, 梯度更新也应该更多, 所以用 sum
+        loss = F.cross_entropy(logits, targets, reduction="sum")
+        acc = self.ar_accuracy_metric(logits.detach(), targets).item()
         return loss, acc
 
     # 需要看下这个函数和 forward 的区别以及没有 semantic 的时候 prompts 输入什么
@@ -675,7 +637,7 @@ class Text2SemanticDecoder(nn.Module):
         xy_attn_mask = xy_mask.logical_or(_xy_padding_mask)
         xy_attn_mask = xy_attn_mask.unsqueeze(1).expand(-1, self.num_head, -1, -1)
         xy_attn_mask = xy_attn_mask.bool()
-        xy_padding_mask = xy_padding_mask.view(bsz, src_len, 1).expand(-1, -1, self.model_dim)
+        xy_padding_mask = xy_padding_mask.view(bsz, src_len, 1)
 
         ###### decode #####
         y_list = [None]*y.shape[0]
@@ -867,6 +829,7 @@ class Text2SemanticDecoder(nn.Module):
 
             if idx == 0:
                 xy_attn_mask = None
+            if(idx<11):###至少预测出10个token不然不给停止（0.4s）
                 logits = logits[:, :-1]
 
             samples = sample(
