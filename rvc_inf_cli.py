@@ -18,7 +18,7 @@ from rvc_cli.rvc.train.process.model_information import model_information
 from rvc_cli.rvc.train.process.extract_small_model import extract_small_model
 from rvc_cli.rvc.lib.tools.analyzer import analyze_audio
 from rvc_cli.rvc.lib.tools.launch_tensorboard import launch_tensorboard_pipeline
-from rvc_cli.rvc.lib.tools.model_download import model_download_pipeline
+##from rvc_cli.rvc.lib.tools.model_download import model_download_pipeline
 
 python = sys.executable
 
@@ -635,9 +635,9 @@ def run_tensorboard_script():
 
 
 # Download
-def run_download_script(model_link: str):
-    model_download_pipeline(model_link)
-    return f"Model downloaded successfully."
+#def run_download_script(model_link: str):
+#    model_download_pipeline(model_link)
+#    return f"Model downloaded successfully."
 
 
 # Prerequisites
@@ -2564,10 +2564,10 @@ def main():
             )
         elif args.mode == "tensorboard":
             run_tensorboard_script()
-        elif args.mode == "download":
-            run_download_script(
-                model_link=args.model_link,
-            )
+#        elif args.mode == "download":
+#            run_download_script(
+#                model_link=args.model_link,
+#            )
         elif args.mode == "prerequisites":
             run_prerequisites_script(
                 pretraineds_v1_f0=args.pretraineds_v1_f0,

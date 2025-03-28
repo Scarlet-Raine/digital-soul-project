@@ -11,6 +11,7 @@ import signal
 import os
 import torch
 import discord
+import re
 from discord.ext import commands
 import asyncio
 from hypercorn.config import Config
@@ -239,11 +240,25 @@ except Exception as e:
     traceback.print_exc()
 
 import torch
-device = 'cpu'
+# Set up precision for hardware acceleration
 if torch.cuda.is_available():
-    device = 'cuda'
-elif torch.backends.mps.is_available():
-    device = 'cpu'
+    device = "cuda"
+    # Check if GPU supports BF16 (Ampere or newer)
+    if torch.cuda.get_device_capability()[0] >= 8:
+        is_half = True
+        dtype = torch.bfloat16  # Use BF16 for modern GPUs
+        print(f"Using device: {device}, precision: BF16 (mixed precision)")
+    else:
+        is_half = True
+        dtype = torch.float16  # Fall back to FP16 for older GPUs
+        print(f"Using device: {device}, precision: FP16 (mixed precision)")
+else:
+    device = "cpu"
+    is_half = False
+    dtype = torch.float32
+    print(f"Using device: {device}, precision: FP32")
+
+print(f"Using device: {device}, precision: {dtype}")
 
 # Add a simple chat logger class
 class ChatLogger:
@@ -390,6 +405,42 @@ def run_gemini_cli():
         if gemini_process:
             gemini_process.terminate()
 
+
+def process_text_in_chunks(text, max_chars=75):
+    """Split text into chunks and process each separately"""
+    # Split text into sentences first
+    sentences = []
+    for sent in re.split(r'([.!?])', text):
+        if sent.strip():
+            if sent in ['.', '!', '?']:
+                # Append punctuation to the previous sentence
+                if sentences:
+                    sentences[-1] += sent
+            else:
+                sentences.append(sent)
+    
+    # Group sentences into chunks of appropriate size
+    chunks = []
+    current_chunk = ""
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) < max_chars:
+            current_chunk += sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence
+    
+    # Add the last chunk if not empty
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    # Make sure each chunk ends with proper punctuation
+    for i in range(len(chunks)):
+        if not chunks[i].rstrip().endswith(('.', '!', '?')):
+            chunks[i] += '.'
+            
+    return chunks
+
 def run_tts_cli():
     try:
         print(f"\033[94m[{time.strftime('%H:%M:%S')}] Initializing GPT-SoVITS...\033[0m")
@@ -444,6 +495,7 @@ def run_tts_cli():
             tts_config.device = device
             tts_config.is_half = is_half
             tts_config.version = version
+            tts_config.dtype = dtype
             tts_config.t2s_weights_path = SOVITS_CONFIG["gpt_path"]
             tts_config.vits_weights_path = SOVITS_CONFIG["sovits_path"]
             
@@ -480,9 +532,34 @@ def run_tts_cli():
             
             # Create the TTS pipeline
             tts_pipeline = TTS(tts_config)
-            
+
+            # Set model precision
+            if is_half:
+                if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+                    # Use BF16 on compatible GPUs
+                    if hasattr(tts_pipeline, 't2s_model') and tts_pipeline.t2s_model:
+                        tts_pipeline.t2s_model = tts_pipeline.t2s_model.to(torch.bfloat16)
+                    if hasattr(tts_pipeline, 'vits_model') and tts_pipeline.vits_model:
+                        tts_pipeline.vits_model = tts_pipeline.vits_model.to(torch.bfloat16)
+                    print(f"\033[92m[{time.strftime('%H:%M:%S')}] Using BFloat16 precision\033[0m")
+                else:
+                    # Fall back to FP16
+                    if hasattr(tts_pipeline, 't2s_model') and tts_pipeline.t2s_model:
+                        tts_pipeline.t2s_model = tts_pipeline.t2s_model.to(torch.float16)
+                    if hasattr(tts_pipeline, 'vits_model') and tts_pipeline.vits_model:
+                        tts_pipeline.vits_model = tts_pipeline.vits_model.to(torch.float16)
+                    print(f"\033[92m[{time.strftime('%H:%M:%S')}] Using Float16 precision\033[0m")
             if not os.path.exists(SOVITS_CONFIG["ref_audio"]):
                 raise FileNotFoundError(f"Reference audio not found: {SOVITS_CONFIG['ref_audio']}")
+            # Log precision information
+            if hasattr(tts_pipeline, 'precision'):
+                print(f"\033[92m[{time.strftime('%H:%M:%S')}] TTS Pipeline precision: {tts_pipeline.precision}\033[0m")
+            for model_name in ['t2s_model', 'vits_model', 'bert_model', 'cnhuhbert_model']:
+                if hasattr(tts_pipeline, model_name) and getattr(tts_pipeline, model_name) is not None:
+                    model = getattr(tts_pipeline, model_name)
+                    param = next(model.parameters(), None)
+                    if param is not None:
+                        print(f"\033[92m[{time.strftime('%H:%M:%S')}] {model_name} dtype: {param.dtype}\033[0m")
                 
             processes_ready['tts'].set()
             print(f"\033[92m[{time.strftime('%H:%M:%S')}] GPT-SoVITS initialization complete\033[0m")
@@ -511,17 +588,31 @@ def run_tts_cli():
                     
                 print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing TTS: {text.decode()}\033[0m")
                 
+                # In web.py, in the run_tts_cli function, replace:
                 try:
-                    text_chunks = text.decode().split('。' if SOVITS_CONFIG['output_language'] == 'Japanese' else '.')
+                    # Split text into chunks but preserve all parts
+                    text_chunks = [chunk for chunk in text.decode().split('.') if chunk.strip()]
                     all_audio_data = []
                     sample_rate = None
+
+                    # Clear cache before processing chunks
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     
-                    for chunk in text_chunks:
-                        if not chunk.strip():
-                            continue
-                            
+                    # Ensure balanced sentences
+                    full_text = text.decode().strip()
+                    chunks = process_text_in_chunks(full_text)
+                    print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing text in {len(chunks)} chunks\033[0m")
+                    
+                    all_audio_data = []
+                    sample_rate = None
+
+                    for chunk in chunks:
+                        print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing chunk: {chunk}\033[0m")
+                        
+                        # Process each chunk with the same settings
                         inputs = {
-                            "text": chunk.strip(),
+                            "text": chunk,
                             "text_lang": dict_language[SOVITS_CONFIG["output_language"]],
                             "ref_audio_path": SOVITS_CONFIG["ref_audio"],
                             "aux_ref_audio_paths": [],
@@ -533,29 +624,48 @@ def run_tts_cli():
                             "text_split_method": cut_method[how_to_cut],
                             "batch_size": int(SOVITS_CONFIG["tuning_params"]["batch_size"]),
                             "speed_factor": float(SOVITS_CONFIG["tuning_params"]["speed_factor"]),
-                            "split_bucket": True,
+                            "split_bucket": False,
                             "return_fragment": False,
                             "fragment_interval": float(SOVITS_CONFIG["tuning_params"]["fragment_interval"]),
                             "seed": int(SOVITS_CONFIG["tuning_params"]["seed"]),
-                            "parallel_infer": True,
+                            "parallel_infer": False,
                             "repetition_penalty": float(SOVITS_CONFIG["tuning_params"]["repetition_penalty"])
                         }
                         
-                        for sr, audio in tts_pipeline.run(inputs):
-                            if sample_rate is None:
-                                sample_rate = sr
-                            all_audio_data.append(audio)
+                        # Process the chunk
+                        with torch.cuda.amp.autocast(enabled=is_half and torch.cuda.is_available(), dtype=dtype):
+                            for sr, audio in tts_pipeline.run(inputs):
+                                if sample_rate is None:
+                                    sample_rate = sr
+                                all_audio_data.append(audio)
+                                
+                        # Clear cache after each chunk
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()    
 
                     if all_audio_data:
                         import numpy as np
                         final_audio = np.concatenate(all_audio_data)
                         
                         timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        # When processing with RVC
                         sovits_output = os.path.join("audio", "temp", f"sovits_{timestamp}.wav")
                         os.makedirs(os.path.dirname(sovits_output), exist_ok=True)
-                        
+                        # After processing TTS
                         import soundfile as sf
-                        sf.write(sovits_output, final_audio, sample_rate)
+                        with torch.no_grad():
+                            # Ensure audio is float32 for saving
+                            final_audio_float32 = final_audio.astype(np.float32)
+                            
+                            # Save with explicit format and proper scaling
+                            sovits_output = os.path.abspath(os.path.join("audio", "temp", f"sovits_{timestamp}.wav"))
+                            # Ensure proper scaling for soundfile - values should be between -1 and 1
+                            if np.max(np.abs(final_audio_float32)) > 1.0:
+                                final_audio_float32 = final_audio_float32 / 32768.0
+                            sf.write(sovits_output, final_audio_float32, sample_rate, 'PCM_24')
+                            
+                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] TTS output saved to {sovits_output}\033[0m")
+                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] File exists: {os.path.exists(sovits_output)}\033[0m")
                         
                         # Process with RVC
                         rvc_queue.put(sovits_output)
@@ -566,7 +676,7 @@ def run_tts_cli():
                         rvc_success = False
                         try:
                             while not os.path.exists(output):
-                                if time.time() - start_time > 25:  # Reduced timeout
+                                if time.time() - start_time > 60:  # Increased timeout
                                     raise TimeoutError("RVC processing timeout")
                                 time.sleep(0.2)  # More frequent checks
                             

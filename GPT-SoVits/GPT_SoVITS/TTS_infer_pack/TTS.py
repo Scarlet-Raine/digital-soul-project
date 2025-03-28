@@ -149,6 +149,18 @@ class TTS_Config:
         default_config_key = "default"if version=="v1" else "default_v2"
         self.configs:dict = configs.get("custom", deepcopy(self.default_configs[default_config_key]))
 
+        # First set up basic attributes from configs
+        self.device = self.configs.get("device", torch.device("cpu"))
+        self.is_half = self.configs.get("is_half", False)
+        self.version = version
+
+        # Now set up dtype based on the initialized is_half
+        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+            self.dtype = torch.bfloat16 if self.is_half else torch.float32
+        else:
+            self.dtype = torch.float16 if self.is_half else torch.float32
+        self.configs["dtype"] = str(self.dtype)
+
 
         self.device = self.configs.get("device", torch.device("cpu"))
         self.is_half = self.configs.get("is_half", False)
@@ -158,6 +170,8 @@ class TTS_Config:
         self.bert_base_path = self.configs.get("bert_base_path", None)
         self.cnhuhbert_base_path = self.configs.get("cnhuhbert_base_path", None)
         self.languages = self.v2_languages if self.version=="v2" else self.v1_languages
+        # Add dtype support
+        self.dtype = self.configs.get("dtype", torch.float16 if self.is_half else torch.float32)
 
 
         if (self.t2s_weights_path in [None, ""]) or (not os.path.exists(self.t2s_weights_path)):
@@ -278,6 +292,9 @@ class TTS:
 
         self.stop_flag:bool = False
         self.precision:torch.dtype = torch.float16 if self.configs.is_half else torch.float32
+        # Support BF16 if available
+        if hasattr(self.configs, 'dtype') and self.configs.dtype is not None:
+            self.precision = self.configs.dtype
 
     def _init_models(self,):
         self.init_t2s_weights(self.configs.t2s_weights_path)
@@ -294,7 +311,11 @@ class TTS:
         self.cnhuhbert_model=self.cnhuhbert_model.eval()
         self.cnhuhbert_model = self.cnhuhbert_model.to(self.configs.device)
         if self.configs.is_half and str(self.configs.device)!="cpu":
-            self.cnhuhbert_model = self.cnhuhbert_model.half()
+            # Use the precision type if available
+            if hasattr(self, 'precision'):
+                self.cnhuhbert_model = self.cnhuhbert_model.to(dtype=self.precision)
+            else:
+                self.cnhuhbert_model = self.cnhuhbert_model.half()
 
 
 
@@ -305,7 +326,11 @@ class TTS:
         self.bert_model=self.bert_model.eval()
         self.bert_model = self.bert_model.to(self.configs.device)
         if self.configs.is_half and str(self.configs.device)!="cpu":
-            self.bert_model = self.bert_model.half()
+            # Use the precision type if available
+            if hasattr(self, 'precision'):
+                self.bert_model = self.bert_model.to(dtype=self.precision)
+            else:
+                self.bert_model = self.bert_model.half()
 
     def init_vits_weights(self, weights_path: str):
         print(f"Loading VITS weights from {weights_path}")
@@ -342,7 +367,11 @@ class TTS:
         vits_model.load_state_dict(dict_s2["weight"], strict=False)
         self.vits_model = vits_model
         if self.configs.is_half and str(self.configs.device)!="cpu":
-            self.vits_model = self.vits_model.half()
+            # Use the precision type if available
+            if hasattr(self, 'precision'):
+                self.vits_model = self.vits_model.to(dtype=self.precision)
+            else:
+                self.vits_model = self.vits_model.half()
 
 
     def init_t2s_weights(self, weights_path: str):
@@ -359,32 +388,55 @@ class TTS:
         t2s_model = t2s_model.eval()
         self.t2s_model = t2s_model
         if self.configs.is_half and str(self.configs.device)!="cpu":
-            self.t2s_model = self.t2s_model.half()
+            # Use the precision type if available
+            if hasattr(self, 'precision'):
+                self.t2s_model = self.t2s_model.to(dtype=self.precision)
+            else:
+                self.t2s_model = self.t2s_model.half()
 
-    def enable_half_precision(self, enable: bool = True, save: bool = True):
+    def enable_half_precision(self, enable: bool = True, save: bool = True, dtype=None):
         '''
             To enable half precision for the TTS model.
             Args:
                 enable: bool, whether to enable half precision.
-
+                save: bool, whether to save the configuration.
+                dtype: torch.dtype, precision type (torch.float16 or torch.bfloat16)
         '''
         if str(self.configs.device) == "cpu" and enable:
             print("Half precision is not supported on CPU.")
             return
 
         self.configs.is_half = enable
-        self.precision = torch.float16 if enable else torch.float32
+        
+        # Set precision based on input dtype or autodetect best available precision
+        if dtype is not None:
+            self.precision = dtype
+        elif enable and torch.cuda.is_available():
+            # Use BF16 for Ampere or newer GPUs
+            if torch.cuda.get_device_capability()[0] >= 8:
+                self.precision = torch.bfloat16
+                print("Using BF16 precision (better for training stability)")
+            else:
+                self.precision = torch.float16
+                print("Using FP16 precision (older GPU)")
+        else:
+            self.precision = torch.float32
+            
+        # Update configs
+        self.configs.dtype = self.precision
+        
         if save:
             self.configs.save_configs()
-        if enable:
-            if self.t2s_model is not None:
-                self.t2s_model =self.t2s_model.half()
-            if self.vits_model is not None:
-                self.vits_model = self.vits_model.half()
-            if self.bert_model is not None:
-                self.bert_model =self.bert_model.half()
-            if self.cnhuhbert_model is not None:
-                self.cnhuhbert_model = self.cnhuhbert_model.half()
+        
+        # Apply precision to models
+        if self.t2s_model is not None:
+            self.t2s_model = self.t2s_model.to(dtype=self.precision)
+        if self.vits_model is not None:
+            self.vits_model = self.vits_model.to(dtype=self.precision)
+        if self.bert_model is not None:
+            self.bert_model = self.bert_model.to(dtype=self.precision)
+        if self.cnhuhbert_model is not None:
+            self.cnhuhbert_model = self.cnhuhbert_model.to(dtype=self.precision)
         else:
             if self.t2s_model is not None:
                 self.t2s_model = self.t2s_model.float()
@@ -455,9 +507,12 @@ class TTS:
         return spec
 
     def _set_prompt_semantic(self, ref_wav_path:str):
+        # Use numpy dtype that matches our precision
+        np_dtype = np.float16 if (self.configs.is_half or (hasattr(self, 'precision') and self.precision == torch.float16)) else np.float32
+        
         zero_wav = np.zeros(
             int(self.configs.sampling_rate * 0.3),
-            dtype=np.float16 if self.configs.is_half else np.float32,
+            dtype=np_dtype,
         )
         with torch.no_grad():
             wav16k, sr = librosa.load(ref_wav_path, sr=16000)
@@ -467,9 +522,15 @@ class TTS:
             zero_wav_torch = torch.from_numpy(zero_wav)
             wav16k = wav16k.to(self.configs.device)
             zero_wav_torch = zero_wav_torch.to(self.configs.device)
+            
+            # Convert to the correct precision
             if self.configs.is_half:
-                wav16k = wav16k.half()
-                zero_wav_torch = zero_wav_torch.half()
+                if hasattr(self, 'precision'):
+                    wav16k = wav16k.to(dtype=self.precision)
+                    zero_wav_torch = zero_wav_torch.to(dtype=self.precision)
+                else:
+                    wav16k = wav16k.half()
+                    zero_wav_torch = zero_wav_torch.half()
 
             wav16k = torch.cat([wav16k, zero_wav_torch])
             hubert_feature = self.cnhuhbert_model.model(wav16k.unsqueeze(0))[
@@ -504,13 +565,17 @@ class TTS:
         return batch
 
     def to_batch(self, data:list,
-                 prompt_data:dict=None,
-                 batch_size:int=5,
-                 threshold:float=0.75,
-                 split_bucket:bool=True,
-                 device:torch.device=torch.device("cpu"),
-                 precision:torch.dtype=torch.float32,
-                 ):
+                prompt_data:dict=None,
+                batch_size:int=5,
+                threshold:float=0.75,
+                split_bucket:bool=True,
+                device:torch.device=torch.device("cpu"),
+                precision:torch.dtype=torch.float32,
+                ):
+        # Ensure precision parameter is set to the instance precision if not specified
+        if precision is torch.float32 and hasattr(self, 'precision'):
+            precision = self.precision
+        
         _data:list = []
         index_and_len_list = []
         for idx, item in enumerate(data):
@@ -674,7 +739,7 @@ class TTS:
             Tuple[int, np.ndarray]: sampling rate and audio data.
         """
         ########## variables initialization ###########
-        self.stop_flag:bool = False
+        self.stop_flag = False
         text:str = inputs.get("text", "")
         text_lang:str = inputs.get("text_lang", "")
         ref_audio_path:str = inputs.get("ref_audio_path", "")
@@ -834,6 +899,11 @@ class TTS:
             t_34 = 0.0
             t_45 = 0.0
             audio = []
+            
+            # Determine if we should use autocast
+            use_autocast = self.configs.is_half and (str(self.configs.device) != "cpu")
+            precision_type = self.precision if hasattr(self, 'precision') else (torch.float16 if self.configs.is_half else torch.float32)
+            
             for item in data:
                 t3 = ttime()
                 if return_fragment:
@@ -856,20 +926,22 @@ class TTS:
                 else:
                     prompt = self.prompt_cache["prompt_semantic"].expand(len(all_phoneme_ids), -1).to(self.configs.device)
 
-
-                pred_semantic_list, idx_list = self.t2s_model.model.infer_panel(
-                    all_phoneme_ids,
-                    all_phoneme_lens,
-                    prompt,
-                    all_bert_features,
-                    # prompt_phone_len=ph_offset,
-                    top_k=top_k,
-                    top_p=top_p,
-                    temperature=temperature,
-                    early_stop_num=self.configs.hz * self.configs.max_sec,
-                    max_len=max_len,
-                    repetition_penalty=repetition_penalty,
-                )
+                # Use autocast for mixed precision if enabled
+                precision_type = self.precision if hasattr(self, 'precision') else (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 and self.configs.is_half else (torch.float16 if self.configs.is_half else torch.float32))
+                with torch.cuda.amp.autocast(enabled=use_autocast, dtype=precision_type):
+                    pred_semantic_list, idx_list = self.t2s_model.model.infer_panel(
+                        all_phoneme_ids,
+                        all_phoneme_lens,
+                        prompt,
+                        all_bert_features,
+                        # prompt_phone_len=ph_offset,
+                        top_k=top_k,
+                        top_p=top_p,
+                        temperature=temperature,
+                        early_stop_num=self.configs.hz * self.configs.max_sec,
+                        max_len=max_len,
+                        repetition_penalty=repetition_penalty,
+                    )
                 t4 = ttime()
                 t_34 += t4 - t3
 
@@ -891,30 +963,31 @@ class TTS:
                 #         pred_semantic, pred_semantic_len, batch_phones, batch_phones_len,refer_audio_spec
                 #     ))
 
-                if speed_factor == 1.0:
-                    # ## vits并行推理 method 2
-                    pred_semantic_list = [item[-idx:] for item, idx in zip(pred_semantic_list, idx_list)]
-                    upsample_rate = math.prod(self.vits_model.upsample_rates)
-                    audio_frag_idx = [pred_semantic_list[i].shape[0]*2*upsample_rate for i in range(0, len(pred_semantic_list))]
-                    audio_frag_end_idx = [ sum(audio_frag_idx[:i+1]) for i in range(0, len(audio_frag_idx))]
-                    all_pred_semantic = torch.cat(pred_semantic_list).unsqueeze(0).unsqueeze(0).to(self.configs.device)
-                    _batch_phones = torch.cat(batch_phones).unsqueeze(0).to(self.configs.device)
-                    _batch_audio_fragment = (self.vits_model.decode(
-                            all_pred_semantic, _batch_phones, refer_audio_spec, speed=speed_factor
-                        ).detach()[0, 0, :])
-                    audio_frag_end_idx.insert(0, 0)
-                    batch_audio_fragment= [_batch_audio_fragment[audio_frag_end_idx[i-1]:audio_frag_end_idx[i]] for i in range(1, len(audio_frag_end_idx))]
-                else:
-                # ## vits串行推理
-                    for i, idx in enumerate(idx_list):
-                        phones = batch_phones[i].unsqueeze(0).to(self.configs.device)
-                        _pred_semantic = (pred_semantic_list[i][-idx:].unsqueeze(0).unsqueeze(0))   # .unsqueeze(0)#mq要多unsqueeze一次
-                        audio_fragment =(self.vits_model.decode(
-                                _pred_semantic, phones, refer_audio_spec, speed=speed_factor
+                with torch.cuda.amp.autocast(enabled=use_autocast, dtype=precision_type):
+                    if speed_factor == 1.0:
+                        # ## vits并行推理 method 2
+                        pred_semantic_list = [item[-idx:] for item, idx in zip(pred_semantic_list, idx_list)]
+                        upsample_rate = math.prod(self.vits_model.upsample_rates)
+                        audio_frag_idx = [pred_semantic_list[i].shape[0]*2*upsample_rate for i in range(0, len(pred_semantic_list))]
+                        audio_frag_end_idx = [ sum(audio_frag_idx[:i+1]) for i in range(0, len(audio_frag_idx))]
+                        all_pred_semantic = torch.cat(pred_semantic_list).unsqueeze(0).unsqueeze(0).to(self.configs.device)
+                        _batch_phones = torch.cat(batch_phones).unsqueeze(0).to(self.configs.device)
+                        _batch_audio_fragment = (self.vits_model.decode(
+                                all_pred_semantic, _batch_phones, refer_audio_spec, speed=speed_factor
                             ).detach()[0, 0, :])
-                        batch_audio_fragment.append(
-                            audio_fragment
-                        )  ###试试重建不带上prompt部分
+                        audio_frag_end_idx.insert(0, 0)
+                        batch_audio_fragment= [_batch_audio_fragment[audio_frag_end_idx[i-1]:audio_frag_end_idx[i]] for i in range(1, len(audio_frag_end_idx))]
+                    else:
+                    # ## vits串行推理
+                        for i, idx in enumerate(idx_list):
+                            phones = batch_phones[i].unsqueeze(0).to(self.configs.device)
+                            _pred_semantic = (pred_semantic_list[i][-idx:].unsqueeze(0).unsqueeze(0))   # .unsqueeze(0)#mq要多unsqueeze一次
+                            audio_fragment =(self.vits_model.decode(
+                                    _pred_semantic, phones, refer_audio_spec, speed=speed_factor
+                                ).detach()[0, 0, :])
+                            batch_audio_fragment.append(
+                                audio_fragment
+                            )  ###试试重建不带上prompt部分
 
                 t5 = ttime()
                 t_45 += t5 - t4
@@ -976,42 +1049,60 @@ class TTS:
             pass
 
     def audio_postprocess(self,
-                          audio:List[torch.Tensor],
-                          sr:int,
-                          batch_index_list:list=None,
-                          speed_factor:float=1.0,
-                          split_bucket:bool=True,
-                          fragment_interval:float=0.3
-                          )->Tuple[int, np.ndarray]:
+                        audio:List[torch.Tensor],
+                        sr:int,
+                        batch_index_list:list=None,
+                        speed_factor:float=1.0,
+                        split_bucket:bool=True,
+                        fragment_interval:float=0.3
+                        )->Tuple[int, np.ndarray]:
+        # Use a smaller fragment interval to reduce silence
+        fragment_interval = min(0.1, fragment_interval)
+        
+        # Create a smaller zero padding
         zero_wav = torch.zeros(
                         int(self.configs.sampling_rate * fragment_interval),
-                        dtype=self.precision,
+                        dtype=torch.float32,  # Always use float32 for zero padding
                         device=self.configs.device
                     )
 
         for i, batch in enumerate(audio):
             for j, audio_fragment in enumerate(batch):
-                max_audio=torch.abs(audio_fragment).max()#简单防止16bit爆音
-                if max_audio>1: audio_fragment/=max_audio
-                audio_fragment:torch.Tensor = torch.cat([audio_fragment, zero_wav], dim=0)
-                audio[i][j] = audio_fragment.cpu().numpy()
-
+                # First convert to float32 for consistent processing
+                audio_fragment = audio_fragment.to(torch.float32)
+                
+                # Apply volume normalization
+                max_audio = torch.abs(audio_fragment).max()
+                if max_audio > 1: 
+                    audio_fragment = audio_fragment / max_audio
+                    
+                # Add small padding at the end (use much less padding)
+                audio_fragment = torch.cat([audio_fragment, zero_wav], dim=0)
+                
+                # Convert to NumPy with explicit dtype
+                audio[i][j] = audio_fragment.cpu().numpy().astype(np.float32)
 
         if split_bucket:
             audio = self.recovery_order(audio, batch_index_list)
         else:
-            # audio = [item for batch in audio for item in batch]
             audio = sum(audio, [])
 
-
+        # Concatenate all audio chunks
         audio = np.concatenate(audio, 0)
+        
+        # Trim any silence at the end (detect where audio falls below threshold)
+        if len(audio) > 0:
+            # Find where audio amplitude falls below threshold
+            threshold = 0.01  # Adjust threshold as needed
+            indices = np.where(np.abs(audio) > threshold)[0]
+            if len(indices) > 0:
+                last_sound_idx = indices[-1]
+                # Keep a bit of silence at the end (0.2 seconds)
+                end_idx = min(len(audio), last_sound_idx + int(sr * 0.2))
+                audio = audio[:end_idx]
+        
+        # Convert to int16 for final output
         audio = (audio * 32768).astype(np.int16)
-
-        # try:
-        #     if speed_factor != 1.0:
-        #         audio = speed_change(audio, speed=speed_factor, sr=int(sr))
-        # except Exception as e:
-        #     print(f"Failed to change speed of audio: \n{e}")
 
         return sr, audio
 

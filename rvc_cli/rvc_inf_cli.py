@@ -26,6 +26,10 @@ from rvc.lib.tools.analyzer import analyze_audio
 from rvc.lib.tools.launch_tensorboard import launch_tensorboard_pipeline
 from rvc.lib.tools.model_download import model_download_pipeline
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 python = sys.executable
 
 
@@ -2331,27 +2335,75 @@ def parse_arguments():
     return parser.parse_args()
 
 def run_server():
-   config = json.loads(input().strip())  # Read config first
-   while True:
-       try:
-           input_file = input().strip() 
-           if input_file:
-               timestamp = time.strftime("%Y%m%d_%H%M%S")
-               output_path = os.path.join("audio", "out", f"out_{timestamp}.wav")
-               
-               result = run_infer_script(
-                   input_path=input_file,
-                   output_path=output_path,
-                   **config
-               )
-               print(f"Processed: {output_path}")
-               sys.stdout.flush()
-
-       except EOFError:
-           break
-       except Exception as e:
-           print(f"Error: {str(e)}", file=sys.stderr)
-           sys.stderr.flush()
+    print("RVC Server Ready", file=sys.stderr)
+    sys.stderr.flush()
+    
+    while True:
+        try:
+            # Read config as JSON
+            config_line = input().strip()
+            if not config_line:
+                print("Empty config received", file=sys.stderr)
+                sys.stderr.flush()
+                continue
+                
+            config = json.loads(config_line)
+            
+            # Read input file path
+            input_file = input().strip()
+            if not input_file:
+                print("Empty input file path received", file=sys.stderr)
+                sys.stderr.flush()
+                continue
+                
+            # Check if input file exists
+            if not os.path.exists(input_file):
+                print(f"Input file not found: {input_file}", file=sys.stderr)
+                sys.stderr.flush()
+                print(f"Error: Input file not found: {input_file}")
+                sys.stdout.flush()
+                continue
+                
+            # Generate timestamp-based output path
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join("audio", "out", f"out_{timestamp}.wav")
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Create a copy of config without output_path if it exists
+            infer_config = config.copy()
+            if 'output_path' in infer_config:
+                del infer_config['output_path']
+                
+            print(f"Processing file: {input_file} -> {output_path}", file=sys.stderr)
+            sys.stderr.flush()
+            
+            # Run inference
+            result = run_infer_script(
+                input_path=input_file,
+                output_path=output_path,
+                **infer_config
+            )
+            
+            # Report success
+            print(f"Success: {output_path}")
+            sys.stdout.flush()
+            
+        except EOFError:
+            print("EOFError - Exiting server", file=sys.stderr)
+            sys.stderr.flush()
+            break
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {str(e)}", file=sys.stderr)
+            sys.stderr.flush()
+            print(f"Error: Invalid JSON configuration")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"Error in server: {str(e)}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+            print(f"Error: {str(e)}")
+            sys.stdout.flush()
 
 def main():
     if len(sys.argv) == 1:
