@@ -54,7 +54,7 @@ GPT-SoVits/training_data/
 GPT-SoVits/GPT_SoVITS/pretrained_models/
 audio
 audio\training
-GPT-SoVITS_old
+GPT-SoVITS_old/
 
 # Imported from huggingface.co/lj1995/VoiceConversionWebUI
 /pretrained
