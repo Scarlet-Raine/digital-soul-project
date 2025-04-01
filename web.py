@@ -73,7 +73,7 @@ except ImportError:
 
 # Import i18n
 try:
-    from i18n.i18n import I18nAuto, scan_language_list
+    from i18n.i18n import I18nAuto, scan_language_list # type: ignore
 except ImportError:
     try:
         from tools.i18n.i18n import I18nAuto, scan_language_list
@@ -89,6 +89,12 @@ i18n = I18nAuto(language=language)
 # Add RVC path
 rvc_path = os.path.join(current_dir, 'rvc_cli')
 sys.path.append(rvc_path)
+
+import soundfile as sf
+from tools.i18n.i18n import I18nAuto
+import sys
+import os
+
 
 # Create a helper function for imports
 def safe_import(module_path, fallback_path=None, as_name=None):
@@ -112,16 +118,17 @@ def safe_import(module_path, fallback_path=None, as_name=None):
 
 # Rest of your configuration code stays the same
 SOVITS_CONFIG = {
-    "gpt_path": os.path.join(gpt_sovits_path, "GPT_weights_v2", "2B_JP6-e50.ckpt"),
-    "sovits_path": os.path.join(gpt_sovits_path, "SoVITS_weights_v2", "2B_JP6_e25_s2450.pth"),
+    "gpt_path": os.path.join(gpt_sovits_path, "GPT_weights_v3", "2B_JP3-e50.ckpt"),
+    "sovits_path": os.path.join(gpt_sovits_path, "SoVITS_weights_v3", "2B_JP3_e3_s813_l128.pth"),
     "ref_audio": os.path.join(current_dir, "audio", "reference", "2b_calm_trimm.wav"),  
-    "cnhubert_base_path": os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "chinese-hubert-base"),  # Corrected path
-    "bert_path": "hfl/chinese-roberta-wwm-ext-large",  # This can stay
+    "cnhubert_base_path": os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "chinese-hubert-base"),
+    "bert_path": os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "chinese-roberta-wwm-ext-large"),
+    "bigvgan_path": os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "models--nvidia--bigvgan_v2_24khz_100band_256x"),
     "ref_text": "薔薇の他にもたくさんある 百合や桜に涼らん月の涙",
     "ref_language": i18n("日文"),
     "output_language": i18n("英文"),
     "input_language": i18n("英文"),
-    "how_to_cut": i18n("凑四句一切"),  # Add this
+    "how_to_cut": i18n("凑四句一切"),
     "tuning_params": {
         "top_k": 40,
         "top_p": 1.0,
@@ -133,6 +140,25 @@ SOVITS_CONFIG = {
         "repetition_penalty": 1.2,
     }
 }
+
+is_half = eval(os.environ.get("is_half", "True")) and torch.cuda.is_available()
+version = os.environ.get("version", "v2")
+
+# Set all environment variables
+os.environ["gpt_path"] = SOVITS_CONFIG["gpt_path"]
+os.environ["sovits_path"] = SOVITS_CONFIG["sovits_path"]
+os.environ["cnhubert_base_path"] = SOVITS_CONFIG["cnhubert_base_path"]
+os.environ["bert_path"] = SOVITS_CONFIG["bert_path"]
+os.environ["bigvgan_path"] = SOVITS_CONFIG["bigvgan_path"]  # Add this line
+os.environ["version"] = "v2"
+
+# Add GPT_SoVITS module directory to path if not already there
+gpt_sovits_module_path = os.path.join(current_dir, 'GPT-SoVITS', 'GPT_SoVITS')
+if gpt_sovits_module_path not in sys.path:
+    sys.path.insert(0, gpt_sovits_module_path)
+
+# Now import what we need directly
+from inference_webui import change_gpt_weights, change_sovits_weights, get_tts_wav
 
 RVC_CONFIG = {
     "pth_path": os.path.join(current_dir, "models", "2BJP.pth"),
@@ -190,15 +216,6 @@ rvc_completed = threading.Event()
 
 
 how_to_cut = i18n("凑四句一切")
-is_half = eval(os.environ.get("is_half", "True")) and torch.cuda.is_available()
-version = os.environ.get("version", "v2")
-
-# Set all environment variables
-os.environ["gpt_path"] = SOVITS_CONFIG["gpt_path"]
-os.environ["sovits_path"] = SOVITS_CONFIG["sovits_path"]
-os.environ["cnhubert_base_path"] = SOVITS_CONFIG["cnhubert_base_path"]
-os.environ["bert_path"] = SOVITS_CONFIG["bert_path"]
-os.environ["version"] = "v2"
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="stft with return_complex=False is deprecated.")
@@ -441,126 +458,155 @@ def process_text_in_chunks(text, max_chars=75):
             
     return chunks
 
+def init_bigvgan():
+    """Initialize BigVGAN model"""
+    global bigvgan_model
+    try:
+        from BigVGAN import bigvgan
+        
+        # Try multiple paths in order of priority
+        bigvgan_model_paths = [
+            os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "models--nvidia--bigvgan_v2_24khz_100band_256x"),
+            os.path.join(current_dir, "GPT-SoVITS", "GPT_SoVITS", "pretrained_models", "models--nvidia--bigvgan_v2_24khz_100band_256x"),
+            os.path.join(current_dir, "GPT_SoVITS", "pretrained_models", "models--nvidia--bigvgan_v2_24khz_100band_256x")
+        ]
+        
+        bigvgan_path = None
+        for path in bigvgan_model_paths:
+            if os.path.exists(path):
+                bigvgan_path = path
+                print(f"\033[94m[{time.strftime('%H:%M:%S')}] Found BigVGAN at: {path}\033[0m")
+                break
+                
+        if not bigvgan_path:
+            raise FileNotFoundError("BigVGAN model not found in any expected location")
+            
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Loading BigVGAN from: {bigvgan_path}\033[0m")
+        
+        # Try with CUDA kernels first
+        try:
+            bigvgan_model = bigvgan.BigVGAN.from_pretrained(
+                bigvgan_path,
+                local_files_only=True,
+                use_cuda_kernel=True  # Try to use CUDA kernel
+            )
+            print(f"\033[92m[{time.strftime('%H:%M:%S')}] BigVGAN loaded with CUDA kernel support\033[0m")
+        except Exception as cuda_err:
+            print(f"\033[93m[{time.strftime('%H:%M:%S')}] Failed to load with CUDA kernels: {str(cuda_err)}. Falling back to CPU kernels.\033[0m")
+            # Fallback to CPU kernels if CUDA fails
+            bigvgan_model = bigvgan.BigVGAN.from_pretrained(
+                bigvgan_path,
+                local_files_only=True,
+                use_cuda_kernel=False
+            )
+        
+        # Remove weight norm and set to eval mode
+        bigvgan_model.remove_weight_norm()
+        bigvgan_model = bigvgan_model.eval()
+        
+        # Set proper device and precision
+        if is_half:
+            bigvgan_model = bigvgan_model.half().to(device)
+        else:
+            bigvgan_model = bigvgan_model.to(device)
+            
+        print(f"\033[92m[{time.strftime('%H:%M:%S')}] BigVGAN model initialized successfully\033[0m")
+        
+    except Exception as e:
+        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Failed to initialize BigVGAN: {str(e)}\033[0m")
+        import traceback
+        traceback.print_exc()
+        raise
+
+def ensure_bigvgan():
+    """Download BigVGAN model if it doesn't exist"""
+    # Define the path where BigVGAN should be
+    bigvgan_path = os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "models--nvidia--bigvgan_v2_24khz_100band_256x")
+    
+    # Update SOVITS_CONFIG to use this path
+    SOVITS_CONFIG["bigvgan_path"] = bigvgan_path
+    
+    if not os.path.exists(bigvgan_path):
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] BigVGAN model not found at {bigvgan_path}. Downloading...\033[0m")
+        os.makedirs(bigvgan_path, exist_ok=True)
+        
+        # Download directly from huggingface
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id="nvidia/bigvgan_v2_24khz_100band_256x", 
+                local_dir=bigvgan_path
+            )
+            print(f"\033[92m[{time.strftime('%H:%M:%S')}] BigVGAN model downloaded to {bigvgan_path}\033[0m")
+        except Exception as e:
+            print(f"\033[91m[{time.strftime('%H:%M:%S')}] Failed to download BigVGAN: {str(e)}\033[0m")
+            import traceback
+            traceback.print_exc()
+            raise
+    else:
+        print(f"\033[92m[{time.strftime('%H:%M:%S')}] BigVGAN model found at {bigvgan_path}\033[0m")
+
+def ensure_sovitsv3():
+    """Ensure SoVITS v3 model path is correctly set"""
+    # Define the absolute path where v3 model should be
+    sovitsv3_path = os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "s2Gv3.pth")
+    
+    print(f"\033[94m[{time.strftime('%H:%M:%S')}] Looking for SoVITS v3 model at: {sovitsv3_path}\033[0m")
+    
+    # Update SOVITS_CONFIG
+    SOVITS_CONFIG["sovitsv3_path"] = sovitsv3_path
+    
+    # Check if file exists
+    if not os.path.exists(sovitsv3_path):
+        print(f"\033[93m[{time.strftime('%H:%M:%S')}] Warning: SoVITS v3 model not found at {sovitsv3_path}\033[0m")
+        print(f"\033[93m[{time.strftime('%H:%M:%S')}] V3 features will be disabled\033[0m")
+    else:
+        print(f"\033[92m[{time.strftime('%H:%M:%S')}] SoVITS v3 model found at {sovitsv3_path}\033[0m")
+    
+    # Set environment variable for other modules to use
+    os.environ["sovitsv3_path"] = sovitsv3_path
+
+
 def run_tts_cli():
     try:
-        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Initializing GPT-SoVITS...\033[0m")
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Initializing GPT-SoVITS processing...\033[0m")
         
-        def cleanup_tts():
-            processes_ready['tts'].clear()
-            print(f"\033[93m[{time.strftime('%H:%M:%S')}] TTS cleanup initiated\033[0m")
+        # Make sure output directories exist
+        os.makedirs(os.path.join("audio", "out"), exist_ok=True)
+        os.makedirs(os.path.join("audio", "temp"), exist_ok=True)
         
-        threading.Thread(target=cleanup_tts, daemon=True)
+        # Ensure BigVGAN model is available
+        ensure_bigvgan()
+        ensure_sovitsv3()
 
+        print(f"\033[97m[SYSTEM] CUDA is {'available' if torch.cuda.is_available() else 'not available'}\033[0m")
+        if torch.cuda.is_available():
+            print(f"\033[97m[SYSTEM] GPU: {torch.cuda.get_device_name()}\033[0m")
+            print(f"\033[97m[SYSTEM] CUDA capability: {torch.cuda.get_device_capability()}\033[0m")
+            print(f"\033[97m[SYSTEM] CUDA memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB\033[0m")
+            print(f"\033[97m[SYSTEM] CUDA memory reserved: {torch.cuda.memory_reserved() / 1024**2:.2f} MB\033[0m")
+
+        
+        # Initialize models
         try:
-            print(f"\033[94m[{time.strftime('%H:%M:%S')}] Loading TTS Config and Pipeline...\033[0m")
+            # Initialize TTS directly
+            from inference_webui import change_gpt_weights, change_sovits_weights, get_tts_wav
             
-            # Create output directories if they don't exist
-            os.makedirs(os.path.join("audio", "out"), exist_ok=True)
-            os.makedirs(os.path.join("audio", "temp"), exist_ok=True)
+            # Load model weights
+            change_gpt_weights(SOVITS_CONFIG["gpt_path"])
             
-            # Import directly using absolute path
-            sys.path.insert(0, gpt_sovits_module_path)
+            # Note: change_sovits_weights returns a generator, we need to consume it
+            generator = change_sovits_weights(SOVITS_CONFIG["sovits_path"])
+            try:
+                next(generator)
+            except StopIteration:
+                pass  # This is expected
             
-            # First, dynamically import our required modules using absolute imports
-            TTS_module = safe_import('TTS_infer_pack.TTS', 'GPT_SoVITS.TTS_infer_pack.TTS')
-            if not TTS_module:
-                raise ImportError("Could not import TTS module")
-                
-            TTS = TTS_module.TTS
-            TTS_Config = TTS_module.TTS_Config
+            # Initialize BigVGAN if we're using v3 model
+            if "v3" in SOVITS_CONFIG["sovits_path"]:
+                init_bigvgan()
             
-            # Get text cleaner
-            cleaner_module = safe_import('text.cleaner', 'GPT_SoVITS.text.cleaner')
-            if cleaner_module:
-                clean_text = cleaner_module.clean_text
-            
-            # Get segmentation method
-            seg_module = safe_import('TTS_infer_pack.text_segmentation_method', 
-                                     'GPT_SoVITS.TTS_infer_pack.text_segmentation_method')
-            if seg_module:
-                get_method = seg_module.get_method
-
-            # Initialize TTS config
-# Create output directories if they don't exist
-            os.makedirs(os.path.join("audio", "out"), exist_ok=True)
-            os.makedirs(os.path.join("audio", "temp"), exist_ok=True)
-            
-            # Initialize TTS config
-            config_path = os.path.join(gpt_sovits_module_path, "configs", "tts_infer.yaml")
-            if not os.path.exists(config_path):
-                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Config file not found: {config_path}\033[0m")
-                return
-                
-            tts_config = TTS_Config(config_path)
-            tts_config.device = device
-            tts_config.is_half = is_half
-            tts_config.version = version
-            tts_config.dtype = dtype
-            tts_config.t2s_weights_path = SOVITS_CONFIG["gpt_path"]
-            tts_config.vits_weights_path = SOVITS_CONFIG["sovits_path"]
-            
-            # Set the correct paths for models
-            tts_config.bert_base_path = "hfl/chinese-roberta-wwm-ext-large"  # HF model ID
-            tts_config.cnhuhbert_base_path = SOVITS_CONFIG["cnhubert_base_path"]  # Corrected local path
-
-            # Verify the path exists before proceeding
-            hubert_path = SOVITS_CONFIG["cnhubert_base_path"]
-            if not os.path.exists(hubert_path):
-                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Critical: CNHuBERT path does not exist: {hubert_path}\033[0m")
-                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Checking if pytorch_model.bin exists: {os.path.join(hubert_path, 'pytorch_model.bin')}\033[0m")
-                return
-            # Verify all model files exist for local files
-            for key in ["t2s_weights_path", "vits_weights_path"]:
-                path = getattr(tts_config, key)
-                if not os.path.exists(path):
-                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] Model file not found: {path}\033[0m")
-                    return
-
-            print(f"\033[92m[{time.strftime('%H:%M:%S')}] Creating TTS pipeline with config: {tts_config}\033[0m")
-            
-            # Import dictionary mapping for languages - get them directly from modules
-            get_method = seg_module.get_method if seg_module else None
-            
-            # Import dict_language
-            webui_module = safe_import('inference_webui_fast', 'GPT_SoVITS.inference_webui_fast')
-            if webui_module:
-                dict_language = webui_module.dict_language
-                cut_method = webui_module.cut_method  # Get cut_method from webui_module
-            else:
-                dict_language = None
-                cut_method = None
-            
-            # Create the TTS pipeline
-            tts_pipeline = TTS(tts_config)
-
-            # Set model precision
-            if is_half:
-                if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
-                    # Use BF16 on compatible GPUs
-                    if hasattr(tts_pipeline, 't2s_model') and tts_pipeline.t2s_model:
-                        tts_pipeline.t2s_model = tts_pipeline.t2s_model.to(torch.bfloat16)
-                    if hasattr(tts_pipeline, 'vits_model') and tts_pipeline.vits_model:
-                        tts_pipeline.vits_model = tts_pipeline.vits_model.to(torch.bfloat16)
-                    print(f"\033[92m[{time.strftime('%H:%M:%S')}] Using BFloat16 precision\033[0m")
-                else:
-                    # Fall back to FP16
-                    if hasattr(tts_pipeline, 't2s_model') and tts_pipeline.t2s_model:
-                        tts_pipeline.t2s_model = tts_pipeline.t2s_model.to(torch.float16)
-                    if hasattr(tts_pipeline, 'vits_model') and tts_pipeline.vits_model:
-                        tts_pipeline.vits_model = tts_pipeline.vits_model.to(torch.float16)
-                    print(f"\033[92m[{time.strftime('%H:%M:%S')}] Using Float16 precision\033[0m")
-            if not os.path.exists(SOVITS_CONFIG["ref_audio"]):
-                raise FileNotFoundError(f"Reference audio not found: {SOVITS_CONFIG['ref_audio']}")
-            # Log precision information
-            if hasattr(tts_pipeline, 'precision'):
-                print(f"\033[92m[{time.strftime('%H:%M:%S')}] TTS Pipeline precision: {tts_pipeline.precision}\033[0m")
-            for model_name in ['t2s_model', 'vits_model', 'bert_model', 'cnhuhbert_model']:
-                if hasattr(tts_pipeline, model_name) and getattr(tts_pipeline, model_name) is not None:
-                    model = getattr(tts_pipeline, model_name)
-                    param = next(model.parameters(), None)
-                    if param is not None:
-                        print(f"\033[92m[{time.strftime('%H:%M:%S')}] {model_name} dtype: {param.dtype}\033[0m")
-                
+            # Set flag that TTS is ready
             processes_ready['tts'].set()
             print(f"\033[92m[{time.strftime('%H:%M:%S')}] GPT-SoVITS initialization complete\033[0m")
             
@@ -570,8 +616,7 @@ def run_tts_cli():
             traceback.print_exc()
             return
 
-        os.makedirs(os.path.join("audio", "out"), exist_ok=True)
-
+        # Main processing loop
         while not shutdown_event.is_set():
             try:
                 text = tts_queue.get(timeout=1)
@@ -581,146 +626,144 @@ def run_tts_cli():
                 if not text:
                     continue
                 
-                text = text.encode('ascii', 'ignore').strip()
+                # Process text 
+                text = text.strip()
                 if not text:
                     print(f"\033[91m[{time.strftime('%H:%M:%S')}] Empty text after sanitization\033[0m")
                     continue
                     
-                print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing TTS: {text.decode()}\033[0m")
+                print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing TTS: {text}\033[0m")
                 
-                # In web.py, in the run_tts_cli function, replace:
                 try:
-                    # Split text into chunks but preserve all parts
-                    text_chunks = [chunk for chunk in text.decode().split('.') if chunk.strip()]
-                    all_audio_data = []
-                    sample_rate = None
-
-                    # Clear cache before processing chunks
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    
-                    # Ensure balanced sentences
-                    full_text = text.decode().strip()
-                    chunks = process_text_in_chunks(full_text)
+                    # Process text in chunks to handle long responses better
+                    chunks = process_text_in_chunks(text)
                     print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing text in {len(chunks)} chunks\033[0m")
                     
-                    all_audio_data = []
-                    sample_rate = None
-
-                    for chunk in chunks:
-                        print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing chunk: {chunk}\033[0m")
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    sovits_output = os.path.abspath(os.path.join("audio", "temp", f"sovits_{timestamp}.wav"))
+                    
+                    # Run TTS synthesis directly using get_tts_wav from inference_webui
+                    synthesis_result = get_tts_wav(
+                        ref_wav_path=SOVITS_CONFIG["ref_audio"],
+                        prompt_text=SOVITS_CONFIG["ref_text"],
+                        prompt_language=SOVITS_CONFIG["ref_language"],
+                        text=text,
+                        text_language=SOVITS_CONFIG["output_language"],
+                        how_to_cut=SOVITS_CONFIG.get("how_to_cut", i18n("凑四句一切")),
+                        top_k=int(SOVITS_CONFIG["tuning_params"]["top_k"]),
+                        top_p=float(SOVITS_CONFIG["tuning_params"]["top_p"]),
+                        temperature=float(SOVITS_CONFIG["tuning_params"]["temperature"]),
+                        speed=float(SOVITS_CONFIG["tuning_params"]["speed_factor"]),
+                        sample_steps=8  # Default for v3 models
+                    )
+                    
+                    # Get the result from the generator
+                    result_list = list(synthesis_result)
+                    if result_list:
+                        sample_rate, audio_data = result_list[-1]
                         
-                        # Process each chunk with the same settings
-                        inputs = {
-                            "text": chunk,
-                            "text_lang": dict_language[SOVITS_CONFIG["output_language"]],
-                            "ref_audio_path": SOVITS_CONFIG["ref_audio"],
-                            "aux_ref_audio_paths": [],
-                            "prompt_text": SOVITS_CONFIG["ref_text"],
-                            "prompt_lang": dict_language[SOVITS_CONFIG["ref_language"]],
-                            "top_k": int(SOVITS_CONFIG["tuning_params"]["top_k"]),
-                            "top_p": float(SOVITS_CONFIG["tuning_params"]["top_p"]),
-                            "temperature": float(SOVITS_CONFIG["tuning_params"]["temperature"]),
-                            "text_split_method": cut_method[how_to_cut],
-                            "batch_size": int(SOVITS_CONFIG["tuning_params"]["batch_size"]),
-                            "speed_factor": float(SOVITS_CONFIG["tuning_params"]["speed_factor"]),
-                            "split_bucket": False,
-                            "return_fragment": False,
-                            "fragment_interval": float(SOVITS_CONFIG["tuning_params"]["fragment_interval"]),
-                            "seed": int(SOVITS_CONFIG["tuning_params"]["seed"]),
-                            "parallel_infer": False,
-                            "repetition_penalty": float(SOVITS_CONFIG["tuning_params"]["repetition_penalty"])
-                        }
-                        
-                        # Process the chunk
-                        with torch.cuda.amp.autocast(enabled=is_half and torch.cuda.is_available(), dtype=dtype):
-                            for sr, audio in tts_pipeline.run(inputs):
-                                if sample_rate is None:
-                                    sample_rate = sr
-                                all_audio_data.append(audio)
-                                
-                        # Clear cache after each chunk
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()    
-
-                    if all_audio_data:
-                        import numpy as np
-                        final_audio = np.concatenate(all_audio_data)
-                        
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        # When processing with RVC
-                        sovits_output = os.path.join("audio", "temp", f"sovits_{timestamp}.wav")
-                        os.makedirs(os.path.dirname(sovits_output), exist_ok=True)
-                        # After processing TTS
+                        # Save the output
                         import soundfile as sf
-                        with torch.no_grad():
-                            # Ensure audio is float32 for saving
-                            final_audio_float32 = final_audio.astype(np.float32)
-                            
-                            # Save with explicit format and proper scaling
-                            sovits_output = os.path.abspath(os.path.join("audio", "temp", f"sovits_{timestamp}.wav"))
-                            # Ensure proper scaling for soundfile - values should be between -1 and 1
-                            if np.max(np.abs(final_audio_float32)) > 1.0:
-                                final_audio_float32 = final_audio_float32 / 32768.0
-                            sf.write(sovits_output, final_audio_float32, sample_rate, 'PCM_24')
-                            
-                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] TTS output saved to {sovits_output}\033[0m")
-                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] File exists: {os.path.exists(sovits_output)}\033[0m")
+                        sf.write(sovits_output, audio_data, sample_rate)
+                        
+                        print(f"\033[92m[{time.strftime('%H:%M:%S')}] TTS output saved to {sovits_output}\033[0m")
                         
                         # Process with RVC
                         rvc_queue.put(sovits_output)
-                        output = os.path.join("audio", "out", f"out_{timestamp}.wav")
-
-                        # Add timeout handling with cleanup
-                        start_time = time.time()
-                        rvc_success = False
-                        try:
-                            while not os.path.exists(output):
-                                if time.time() - start_time > 60:  # Increased timeout
-                                    raise TimeoutError("RVC processing timeout")
-                                time.sleep(0.2)  # More frequent checks
-                            
-                            # Validate audio file
-                            if os.path.getsize(output) < 1024:
-                                raise ValueError("Invalid RVC output file size")
-                                
-                            final_output = output
-                            rvc_success = True
-
-                        except (TimeoutError, ValueError) as e:
-                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC Error: {str(e)} - Cleaning up...\033[0m")
-                            # Cleanup failed files
-                            for f in [sovits_output, output]:
-                                try:
-                                    if os.path.exists(f): os.remove(f)
-                                except Exception as e:
-                                    print(f"\033[93mCleanup error: {e}\033[0m")
-                            return
+                        final_output = os.path.join("audio", "out", f"out_{timestamp}.wav")
                         
-                        if final_output and os.path.exists(final_output):
-                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] Full pipeline complete: {final_output}\033[0m")
+                        # Wait for RVC to complete (with timeout)
+                        start_time = time.time()
+                        timeout_seconds = 90  # More generous timeout
+                        rvc_completed = False
+
+                        # Correctly construct the expected file paths
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        final_output = os.path.join("audio", "out", f"out_{timestamp}.wav")
+                        latest_output = os.path.join("audio", "out", "out.wav")
+
+                        # Check both the timestamped output and any RVC output
+                        while time.time() - start_time < timeout_seconds:
+                            # Check for the timestamped output
+                            if os.path.exists(final_output) and os.path.getsize(final_output) > 1000:
+                                print(f"\033[92m[{time.strftime('%H:%M:%S')}] RVC output found: {final_output}\033[0m")
+                                rvc_completed = True
+                                break
                             
-                            # Create symlink for latest output
-                            latest_output = os.path.join("audio", "out", "out.wav")
+                            # Also check for any newer RVC outputs that might have a different timestamp
+                            rvc_outputs = [f for f in os.listdir(os.path.join("audio", "out")) 
+                                        if f.startswith("out_") and f.endswith(".wav")]
+                            if rvc_outputs:
+                                newest_output = max(rvc_outputs, key=lambda x: os.path.getmtime(os.path.join("audio", "out", x)))
+                                newest_path = os.path.join("audio", "out", newest_output)
+                                
+                                # Check if this is a new file (created after we started waiting)
+                                if os.path.getmtime(newest_path) > start_time and os.path.getsize(newest_path) > 1000:
+                                    print(f"\033[92m[{time.strftime('%H:%M:%S')}] Found newer RVC output: {newest_path}\033[0m")
+                                    final_output = newest_path
+                                    rvc_completed = True
+                                    break
+                            
+                            time.sleep(0.5)
+
+                        # After timeout or finding the file
+                        if not rvc_completed:
+                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC processing timeout after {timeout_seconds} seconds\033[0m")
+                            
+                            # Do one final check for any RVC outputs before falling back
+                            rvc_outputs = [f for f in os.listdir(os.path.join("audio", "out")) 
+                                        if f.startswith("out_") and f.endswith(".wav")]
+                            if rvc_outputs:
+                                newest_output = max(rvc_outputs, key=lambda x: os.path.getmtime(os.path.join("audio", "out", x)))
+                                newest_path = os.path.join("audio", "out", newest_output)
+                                
+                                # Check if file size is valid
+                                if os.path.getsize(newest_path) > 1000:
+                                    print(f"\033[92m[{time.strftime('%H:%M:%S')}] Found valid RVC output after timeout: {newest_path}\033[0m")
+                                    final_output = newest_path
+                                    rvc_completed = True
+                            
+                            # Only use fallback if no valid RVC output was found
+                            if not rvc_completed:
+                                if os.path.exists(sovits_output) and os.path.getsize(sovits_output) > 1000:
+                                    print(f"\033[93m[{time.strftime('%H:%M:%S')}] Using SoVITS output directly as fallback\033[0m")
+                                    shutil.copy2(sovits_output, final_output)
+                                    rvc_completed = True
+                                else:
+                                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] No valid audio output found\033[0m")
+
+                        # Update the latest output file
+                        if rvc_completed:
+                            # Remove existing file if it exists
                             if os.path.exists(latest_output):
                                 try:
                                     os.remove(latest_output)
                                 except Exception as e:
-                                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error cleaning up old audio: {e}\033[0m")
-
-                            shutil.copy2(final_output, latest_output)
+                                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error cleaning old audio: {e}\033[0m")
                             
-                            # Cleanup temp file
+                            # Copy the final output to out.wav
                             try:
-                                os.remove(sovits_output)
-                            except Exception as e:
-                                print(f"\033[93m[{time.strftime('%H:%M:%S')}] Error cleaning temp file: {e}\033[0m")
+                                shutil.copy2(final_output, latest_output)
+                                print(f"\033[92m[{time.strftime('%H:%M:%S')}] Final output copied to {latest_output}\033[0m")
                                 
+                                # Only now set the completion flag
+                                print(f"\033[92m[{time.strftime('%H:%M:%S')}] Setting TTS completion flag\033[0m")
+                                tts_completed.set()
+                            except Exception as e:
+                                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error copying final output: {e}\033[0m")
+
+                        # Clean up temp file
+                        try:
+                            if os.path.exists(sovits_output):
+                                os.remove(sovits_output)
+                        except Exception as e:
+                            print(f"\033[93m[{time.strftime('%H:%M:%S')}] Error cleaning temp file: {e}\033[0m")
+                            
+                        if rvc_completed:
+                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] Setting TTS completion flag\033[0m")
                             tts_completed.set()
                         else:
-                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC processing failed\033[0m")
-                    else:
-                        print(f"\033[91m[{time.strftime('%H:%M:%S')}] No audio data generated\033[0m")
+                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] No valid output produced\033[0m")
                         
                 except Exception as e:
                     print(f"\033[91m[{time.strftime('%H:%M:%S')}] TTS synthesis error: {str(e)}\033[0m")
@@ -779,18 +822,43 @@ def run_rvc_cli():
                         # Then send input file
                         rvc_process.stdin.write(f"{input_file}\n")
                         rvc_process.stdin.flush()
-                        
+
                         # Add response timeout
                         output = ""
                         start_time = time.time()
-                        while True:
-                            if time.time() - start_time > RVC_TIMEOUT:
-                                raise TimeoutError("RVC response timeout")
+                        output_received = False
+
+                        while not output_received and time.time() - start_time < RVC_TIMEOUT:
                             line = rvc_process.stdout.readline().strip()
                             if line:
                                 output = line
+                                output_received = True
+                                print(f"\033[94m[{time.strftime('%H:%M:%S')}] RVC output: {output}\033[0m")
+                                
+                                # Wait a short time for file to be fully written
+                                time.sleep(1)
+                                
+                                # Explicitly check if the output file exists before continuing
+                                if 'Converting audio' in output:
+                                    # Parse the output path from the message
+                                    match = re.search(r'audio\\out\\(out_[^\.]+\.wav)', output)
+                                    if match:
+                                        output_file = match.group(1)
+                                        output_path = os.path.join("audio", "out", output_file)
+                                        if os.path.exists(output_path):
+                                            print(f"\033[92m[{time.strftime('%H:%M:%S')}] Confirmed RVC output exists: {output_path}\033[0m")
+                                            # Set completion flag here directly
+                                            tts_completed.set()
+                                            break
+                                
+                            # Check for timeout
+                            if time.time() - start_time >= RVC_TIMEOUT:
                                 break
+                                
                             time.sleep(0.1)
+
+                        if not output_received:
+                            print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC response timeout\033[0m")
                         
                         print(f"\033[94m[{time.strftime('%H:%M:%S')}] RVC output: {output}\033[0m")
 
@@ -799,7 +867,11 @@ def run_rvc_cli():
             except TimeoutError as te:
                 print(f"\033[91m[{time.strftime('%H:%M:%S')}] RVC Timeout: {str(te)}\033[0m")
                 # Reset RVC process
-                rvc_process.terminate()
+                if rvc_process:
+                    try:
+                        rvc_process.terminate()
+                    except:
+                        pass
                 rvc_process = None
                 processes_ready['rvc'].clear()
                 run_rvc_cli()  # Restart RVC process
@@ -810,7 +882,6 @@ def run_rvc_cli():
 
     except Exception as outer_e:
         print(f"\033[91m[{time.strftime('%H:%M:%S')}] Critical RVC failure: {str(outer_e)}\033[0m")
-    
 # Flask routes
 def all_processes_ready():
     return all(event.is_set() for event in processes_ready.values())
@@ -876,13 +947,21 @@ def reset_tts():  # Rename the function too
     tts_completed.clear()
     return jsonify({'status': 'reset'})
 
-# Modify get_response to include RVC status
 @app.route('/get_response', methods=['GET'])
 def get_response():
-    if last_responses and tts_completed.is_set():
+    audio_ready = tts_completed.is_set()
+    latest_output = os.path.join("audio", "out", "out.wav")
+    
+    # Double check if the audio file actually exists
+    if audio_ready and not os.path.exists(latest_output):
+        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Audio reported ready but file is missing\033[0m")
+        audio_ready = False
+        tts_completed.clear()
+    
+    if last_responses:
         return jsonify({
             'response': last_responses[-1],
-            'audio_ready': True
+            'audio_ready': audio_ready
         })
     return jsonify({
         'response': None,

@@ -5,16 +5,6 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QLineEdit, QPushB
 from PyQt5.QtWidgets import QGridLayout, QVBoxLayout, QWidget, QFileDialog, QStatusBar, QComboBox
 import soundfile as sf
 
-import nltk
-
-# Download required NLTK resources
-try:
-    nltk.download('averaged_perceptron_tagger', quiet=True)
-    nltk.download('cmudict', quiet=True)
-    nltk.download('punkt', quiet=True)
-except Exception as e:
-    print(f"Error downloading NLTK resources: {e}")
-
 from tools.i18n.i18n import I18nAuto
 i18n = I18nAuto()
 
