@@ -3,4 +3,4 @@ python rvc_cli.py tts --tts_file "C:\Users\EVO\Documents\AI\rvc-cli\tts.txt" --t
 
 
 
-python rvc_inf_cli.py infer --input_path "C:\Users\EVO\Documents\AI\StyleTTS2\result.wav" --output_path "C:\Users\EVO\Documents\AI\audio\out\out.wav" --pth_path "C:\Users\EVO\Documents\AI\models\2BJP.pth" --index_path "C:\Users\EVO\Documents\AI\models\2BJP.index" --pitch "2" --protect "0.49" --filter_radius "7" --clean_audio "true"
+python rvc_inf_cli.py infer --input_path "G:\Downloads\audio(4).wav" --output_path "C:\Users\EVO\Documents\AI\audio\out\result(4).wav" --pth_path "C:\Users\EVO\Documents\AI\models\2BJP.pth" --index_path "C:\Users\EVO\Documents\AI\models\2BJP.index" --pitch "2" --protect "0.49" --filter_radius "7" --clean_audio "true"
