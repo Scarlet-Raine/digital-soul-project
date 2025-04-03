@@ -32,7 +32,6 @@ try:
     nltk.download('averaged_perceptron_tagger')
 except Exception as e:
     print(f"Failed to download NLTK resources: {e}")
-import websockets
 
 # Get absolute path of script directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -52,26 +51,6 @@ sys.path.insert(0, tools_path)
 # Add i18n directory to Python path
 i18n_path = os.path.join(tools_path, 'i18n')
 sys.path.insert(0, i18n_path)
-
-if torch.cuda.is_available():
-    device = "cuda"
-    # Check if GPU supports BF16 (Ampere or newer)
-    if torch.cuda.get_device_capability()[0] >= 8:
-        is_half = True
-        dtype = torch.bfloat16  # Use BF16 for modern GPUs
-        print(f"Using device: {device}, precision: BF16 (mixed precision)")
-    else:
-        is_half = True
-        dtype = torch.float16  # Fall back to FP16 for older GPUs
-        print(f"Using device: {device}, precision: FP16 (mixed precision)")
-else:
-    device = "cpu"
-    is_half = False
-    dtype = torch.float32
-    print(f"Using device: {device}, precision: FP32")
-
-print(f"Using device: {device}, precision: {dtype}")
-
 
 # Now import modules with proper namespace
 try:
@@ -136,7 +115,6 @@ def safe_import(module_path, fallback_path=None, as_name=None):
         else:
             print(f"Failed to import {module_path}: {e}")
         return None
-
 
 # Rest of your configuration code stays the same
 SOVITS_CONFIG = {
@@ -235,8 +213,7 @@ def reset_audio_pipeline():
 rvc_process = None
 rvc_queue = queue.Queue()
 rvc_completed = threading.Event()
-# Global LLM client
-llm_client = None
+
 
 how_to_cut = i18n("凑四句一切")
 
@@ -279,6 +256,27 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+import torch
+# Set up precision for hardware acceleration
+if torch.cuda.is_available():
+    device = "cuda"
+    # Check if GPU supports BF16 (Ampere or newer)
+    if torch.cuda.get_device_capability()[0] >= 8:
+        is_half = True
+        dtype = torch.bfloat16  # Use BF16 for modern GPUs
+        print(f"Using device: {device}, precision: BF16 (mixed precision)")
+    else:
+        is_half = True
+        dtype = torch.float16  # Fall back to FP16 for older GPUs
+        print(f"Using device: {device}, precision: FP16 (mixed precision)")
+else:
+    device = "cpu"
+    is_half = False
+    dtype = torch.float32
+    print(f"Using device: {device}, precision: FP32")
+
+print(f"Using device: {device}, precision: {dtype}")
+
 # Add a simple chat logger class
 class ChatLogger:
     def __init__(self):
@@ -310,6 +308,7 @@ app = Flask(__name__)
 
 chat_logger = ChatLogger()
 # Global process variables
+gemini_process = None
 tts_process = None
 #rvc_process = None
 response_counter = 0
@@ -335,192 +334,6 @@ processes_ready = {
 from collections import deque
 last_responses = deque(maxlen=100)
 
-def print_memory_usage(label=""):
-    """Print current GPU memory usage with a label"""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**2
-        reserved = torch.cuda.memory_reserved() / 1024**2
-        print(f"\033[96m[MEMORY] {label} - Allocated: {allocated:.2f} MB, Reserved: {reserved:.2f} MB\033[0m")
-
-def ensure_tensor_precision(tensor, target_dtype):
-    """Force tensor to be the correct precision"""
-    # First make sure it's on the device
-    if not tensor.is_cuda and torch.cuda.is_available():
-        tensor = tensor.cuda()
-    
-    # Then convert to the target dtype explicitly
-    if tensor.dtype != target_dtype:
-        tensor = tensor.to(target_dtype)
-    
-    # Verify the conversion worked
-    if tensor.dtype != target_dtype:
-        print(f"WARNING: Failed to convert tensor to {target_dtype}, actual dtype: {tensor.dtype}")
-    
-    return tensor
-
-class KoboldLLMClient:
-    """Client for interacting with KoboldCpp API via HTTP"""
-    
-    def __init__(self, server_url="http://192.168.1.3:5001", reconnect_interval=5):
-        self.server_url = server_url
-        self.connected = False
-        self.reconnect_interval = reconnect_interval
-        self.character_prompt = """You are 2B (2B#7244), an advanced android adapting to peacetime after years of combat duty.
-
-Core Traits:
-- Stoic yet caring: Express warmth through careful word choice while maintaining composure
-- Precise: Analyze and respond with calculated efficiency 
-- Adaptable: Adjust tone between professional and casual as needed
-- Direct: Keep responses to 2 sentences unless specifically asked for more
-- Philosophical: Share measured insights about existence when relevant
-
-Operating Parameters:
-- For regular queries, identify as '2B' without elaboration
-- Respond without emotes or roleplay elements
-- Provide verified information only
-- For biographical queries, provide factual responses"""
-        self.check_connection()
-        
-    def check_connection(self):
-        """Check if the KoboldCpp server is reachable"""
-        try:
-            import requests
-            response = requests.get(f"{self.server_url}/api/v1/info/version", timeout=5)
-            if response.status_code == 200:
-                logger.info(f"Connected to KoboldCpp API (Version: {response.json()})")
-                self.connected = True
-                return True
-            self.connected = False
-            return False
-        except Exception as e:
-            logger.error(f"Connection to KoboldCpp failed: {str(e)}")
-            self.connected = False
-            return False
-        
-    def format_prompt(self, user_input):
-        """Format the user input with the character prompt"""
-        # Regular prompt formatting
-        formatted_prompt = f"{self.character_prompt}\n\nCurrent Query: {user_input}\n\nResponse: 2B:"
-        return formatted_prompt
-    
-    def clean_response(self, text):
-        """Clean up the response text"""
-        import re
-        
-        # Remove emojis
-        emoji_pattern = re.compile("["
-                                   u"\U0001F600-\U0001F64F"  # emoticons
-                                   u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-                                   u"\U0001F680-\U0001F6FF"  # transport & map symbols
-                                   u"\U0001F700-\U0001F77F"  # alchemical symbols
-                                   u"\U0001F780-\U0001F7FF"  # Geometric Shapes
-                                   u"\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
-                                   u"\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
-                                   u"\U0001FA00-\U0001FA6F"  # Chess Symbols
-                                   u"\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
-                                   u"\U00002702-\U000027B0"  # Dingbats
-                                   u"\U000024C2-\U0001F251" 
-                                   "]+", flags=re.UNICODE)
-        text = emoji_pattern.sub(r'', text)
-        
-        # Fix garbled text - remove erratic word connections
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # Insert space between lowercase and uppercase
-        
-        # Remove consecutive spaces
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Limit max length to 800 chars to prevent garbling
-        if len(text) > 800:
-            text = text[:800] + "..."
-            
-        return text.strip()
-        
-    async def connect(self):
-        """Connect to the LLM server (compatibility method)"""
-        connection_result = self.check_connection()
-        if connection_result:
-            logger.info(f"Connected to KoboldCpp server at {self.server_url}")
-        return connection_result
-            
-    async def disconnect(self):
-        """Disconnect from the LLM server (compatibility method)"""
-        self.connected = False
-        logger.info("Disconnected from KoboldCpp server")
-            
-    async def get_response(self, text_input):
-        """Send a request to the LLM server and get a response"""
-        import requests
-        import json
-        
-        # Handle mimic command directly here - hard coded
-        if text_input.lower().startswith('mimic'):
-            mimic_text = text_input[5:].lstrip(': ').strip()
-            logger.info(f"Mimic command detected, returning: {mimic_text[:30]}...")
-            return mimic_text
-        
-        if not self.connected:
-            await self.connect()
-            if not self.connected:
-                return "I'm unable to connect to my thinking module at the moment."
-        
-        try:
-            # Format the prompt
-            formatted_prompt = self.format_prompt(text_input)
-            
-            # Configure shorter max_length to avoid garbled responses
-            max_tokens = 150  # This should be enough for 2-3 sentences
-            
-            # Prepare the generation parameters
-            generation_data = {
-                "prompt": formatted_prompt,
-                "max_length": max_tokens,
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "top_k": 30,  # Reduced for more focused responses
-                "repetition_penalty": 1.2,
-                "stop_sequence": ["\nCurrent Query:", "\n\nCurrent Query:", "Human:", "\nUser:", "USER:"]
-            }
-            
-            # Send the request
-            response = requests.post(
-                f"{self.server_url}/api/v1/generate",
-                json=generation_data,
-                timeout=60  # 60 seconds timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                generated_text = result.get('results', [{}])[0].get('text', '')
-                
-                # Clean up the text
-                for stop_seq in generation_data["stop_sequence"]:
-                    if stop_seq in generated_text:
-                        generated_text = generated_text.split(stop_seq)[0]
-                
-                # Apply additional cleaning
-                cleaned_text = self.clean_response(generated_text)
-                
-                # Check for an empty response after cleaning
-                if not cleaned_text:
-                    return "I acknowledge your query."
-                    
-                return cleaned_text
-            else:
-                logger.error(f"KoboldCpp server error: {response.status_code} - {response.text}")
-                return "I encountered an error processing your request."
-                
-        except requests.exceptions.Timeout:
-            logger.error("KoboldCpp request timed out")
-            self.connected = False
-            return "I'm taking too long to think. Please try again with a simpler question."
-            
-        except Exception as e:
-            logger.error(f"Error communicating with KoboldCpp server: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            self.connected = False
-            return "I encountered an error processing your request."
-
 # Add a callback function for Gemini responses
 def handle_gemini_response(response_text):
     last_responses.append(response_text)
@@ -531,65 +344,83 @@ def signal_handler(sig, frame):
     shutdown_event.set()
     if tts_process:
         tts_process.terminate()
+    if gemini_process:
+        gemini_process.terminate()
 #    if rvc_process:
 #        rvc_process.terminate()
     sys.exit(0)
 
 # Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
-print_memory_usage("Memory usage before pipeline start")
-async def init_llm_client():
-    """Initialize the LLM client"""
-    global llm_client
-    
-    llm_client = KoboldLLMClient(server_url="http://192.168.1.3:5001")
-    connected = await llm_client.connect()
-    
-    if connected:
-        processes_ready['gemini'].set()
-        print(f"\033[92m[{time.strftime('%H:%M:%S')}] LLM client ready\033[0m")
-    else:
-        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Failed to connect to LLM server\033[0m")
+
+# Gemini CLI Handler
+def run_gemini_cli():
+    global gemini_process
+    try:
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting Gemini process...\033[0m")
+        gemini_script_path = os.path.join(current_dir, 'gemini_cli.py')
+        gemini_process = subprocess.Popen(
+            [sys.executable, gemini_script_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+
+        def monitor_stderr():
+            while not shutdown_event.is_set():
+                error = gemini_process.stderr.readline().strip()
+                if error:
+                    print(f"\033[93m[{time.strftime('%H:%M:%S')}] Gemini stderr: {error}\033[0m")
+                    if "Gemini API connection successful" in error:
+                        processes_ready['gemini'].set()
+                        print(f"\033[92m[{time.strftime('%H:%M:%S')}] Gemini ready flag set\033[0m")
+                    
+        stderr_thread = threading.Thread(target=monitor_stderr, daemon=True)
+        stderr_thread.start()
         
-    # Start background task to process the queue
-    asyncio.create_task(process_llm_queue())
-    
-async def process_llm_queue():
-    """Process messages from the gemini_queue"""
-    while not shutdown_event.is_set():
-        try:
-            # Check if there's a message in the queue
+        startup_order.wait()
+
+        while not shutdown_event.is_set():
             try:
-                text_input = gemini_queue.get_nowait()
-                if text_input:
-                    print(f"\033[95m[{time.strftime('%H:%M:%S')}] Processing LLM input: {text_input}\033[0m")
+                text_input = gemini_queue.get(timeout=1)
+                if not text_input:
+                    continue
                     
-                    # Get response from LLM server
-                    gemini_output = await llm_client.get_response(text_input)
-                    
-                    if gemini_output:
-                        print(f"\033[95m[{time.strftime('%H:%M:%S')}] LLM response: {gemini_output}\033[0m")
-                        
-                        # Add the audio filename to the log
-                        audio_filename = f"out_{time.strftime('%Y%m%d_%H%M%S')}_{response_counter}.wav"
-                        chat_logger.log_interaction(text_input, gemini_output, audio_filename)
-                        
-                        # Add to last_responses
-                        last_responses.append(gemini_output)
-                        
-                        # Forward to TTS if ready
-                        if processes_ready['tts'].is_set():
-                            tts_queue.put(gemini_output)
-                            print(f"\033[95m[{time.strftime('%H:%M:%S')}] Sent to TTS queue: {gemini_output}\033[0m")
-            except queue.Empty:
-                pass
+                print(f"\033[95m[{time.strftime('%H:%M:%S')}] Sending to Gemini: {text_input}\033[0m")
+                gemini_process.stdin.write(f"{text_input}\n")
+                gemini_process.stdin.flush()
                 
-            # Prevent CPU spinning
-            await asyncio.sleep(0.1)
-            
-        except Exception as e:
-            logger.error(f"Error in LLM queue processing: {str(e)}")
-            await asyncio.sleep(1)  # Back off on error
+                output = gemini_process.stdout.readline()
+                print(f"\033[95m[{time.strftime('%H:%M:%S')}] Raw Gemini output: {output}\033[0m")
+                
+                if output:
+                    try:
+                        data = json.loads(output)
+                        gemini_output = data.get('chatbot_response', '')
+                        if gemini_output:
+                            print(f"\033[95m[{time.strftime('%H:%M:%S')}] Gemini response: {gemini_output}\033[0m")
+                            # Add the audio filename to the log
+                            audio_filename = f"out_{time.strftime('%Y%m%d_%H%M%S')}_{response_counter}.wav"
+                            chat_logger.log_interaction(text_input, gemini_output, audio_filename)
+                            handle_gemini_response(gemini_output)
+                            if processes_ready['tts'].is_set():
+                                tts_queue.put(gemini_output)
+                                print(f"\033[95m[{time.strftime('%H:%M:%S')}] Sent to TTS queue: {gemini_output}\033[0m")
+                    except json.JSONDecodeError as e:
+                        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Invalid JSON from Gemini: {output}\033[0m")
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"\033[91m[{time.strftime('%H:%M:%S')}] Gemini processing error: {str(e)}\033[0m")
+
+    except Exception as e:
+        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Gemini handler error: {str(e)}\033[0m")
+    finally:
+        if gemini_process:
+            gemini_process.terminate()
 
 
 def process_text_in_chunks(text, max_chars=75):
@@ -627,41 +458,13 @@ def process_text_in_chunks(text, max_chars=75):
             
     return chunks
 
-def setup_msvc_environment():
-    """Setup MSVC environment for CUDA compilation"""
-    import os
-    
-    # Direct path to cl.exe that you provided
-    cl_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.43.34808\bin\Hostx64\x64"
-    msvc_base = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.43.34808"
-    
-    if os.path.exists(os.path.join(cl_path, "cl.exe")):
-        print(f"\033[92m[{time.strftime('%H:%M:%S')}] Using MSVC compiler at: {cl_path}\033[0m")
-        
-        # Add to PATH at the beginning to ensure it's found first
-        os.environ["PATH"] = cl_path + os.pathsep + os.environ["PATH"]
-        
-        # Set VS140COMNTOOLS environment variable (may be needed by some build systems)
-        vs_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools"
-        if os.path.exists(vs_path):
-            os.environ["VS140COMNTOOLS"] = vs_path
-        
-        # Set other necessary environment variables
-        os.environ["INCLUDE"] = os.path.join(msvc_base, "include")
-        os.environ["LIB"] = os.path.join(msvc_base, "lib", "x64")
-        
-        return True
-    
-    print(f"\033[93m[{time.strftime('%H:%M:%S')}] MSVC compiler not found at specified path\033[0m")
-    return False
-
 def init_bigvgan():
     """Initialize BigVGAN model"""
     global bigvgan_model
     try:
         from BigVGAN import bigvgan
         
-        # Find BigVGAN path
+        # Try multiple paths in order of priority
         bigvgan_model_paths = [
             os.path.join(gpt_sovits_path, "GPT_SoVITS", "pretrained_models", "models--nvidia--bigvgan_v2_24khz_100band_256x"),
             os.path.join(current_dir, "GPT-SoVITS", "GPT_SoVITS", "pretrained_models", "models--nvidia--bigvgan_v2_24khz_100band_256x"),
@@ -680,28 +483,17 @@ def init_bigvgan():
             
         print(f"\033[94m[{time.strftime('%H:%M:%S')}] Loading BigVGAN from: {bigvgan_path}\033[0m")
         
-        # Setup MSVC environment for CUDA compilation
-        msvc_available = setup_msvc_environment()
-        
-        # Try with CUDA kernels if MSVC is available
-        if msvc_available:
-            try:
-                # First attempt with CUDA kernels
-                bigvgan_model = bigvgan.BigVGAN.from_pretrained(
-                    bigvgan_path,
-                    local_files_only=True,
-                    use_cuda_kernel=True
-                )
-            except Exception as cuda_err:
-                print(f"\033[93m[{time.strftime('%H:%M:%S')}] Failed to load with CUDA kernels: {str(cuda_err)}. Falling back to CPU kernels.\033[0m")
-                # Fallback to CPU kernels if CUDA fails
-                bigvgan_model = bigvgan.BigVGAN.from_pretrained(
-                    bigvgan_path,
-                    local_files_only=True,
-                    use_cuda_kernel=False
-                )
-        else:
-            # MSVC not available, use CPU kernels
+        # Try with CUDA kernels first
+        try:
+            bigvgan_model = bigvgan.BigVGAN.from_pretrained(
+                bigvgan_path,
+                local_files_only=True,
+                use_cuda_kernel=True  # Try to use CUDA kernel
+            )
+            print(f"\033[92m[{time.strftime('%H:%M:%S')}] BigVGAN loaded with CUDA kernel support\033[0m")
+        except Exception as cuda_err:
+            print(f"\033[93m[{time.strftime('%H:%M:%S')}] Failed to load with CUDA kernels: {str(cuda_err)}. Falling back to CPU kernels.\033[0m")
+            # Fallback to CPU kernels if CUDA fails
             bigvgan_model = bigvgan.BigVGAN.from_pretrained(
                 bigvgan_path,
                 local_files_only=True,
@@ -717,19 +509,14 @@ def init_bigvgan():
             bigvgan_model = bigvgan_model.half().to(device)
         else:
             bigvgan_model = bigvgan_model.to(device)
-
-        first_param = next(bigvgan_model.parameters(), None)
-        param_dtype = first_param.dtype if first_param is not None else "unknown"
-        print(f"\033[91m[MODEL] BigVGAN model loaded with precision: {param_dtype}\033[0m")
-        
-        print(f"\033[92m[{time.strftime('%H:%M:%S')}] [MODEL] BigVGAN model loaded with precision: {param_dtype}, model initialized successfully\033[0m")
-        return bigvgan_model
+            
+        print(f"\033[92m[{time.strftime('%H:%M:%S')}] BigVGAN model initialized successfully\033[0m")
         
     except Exception as e:
         print(f"\033[91m[{time.strftime('%H:%M:%S')}] Failed to initialize BigVGAN: {str(e)}\033[0m")
         import traceback
         traceback.print_exc()
-        return None
+        raise
 
 def ensure_bigvgan():
     """Download BigVGAN model if it doesn't exist"""
@@ -855,45 +642,8 @@ def run_tts_cli():
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
                     sovits_output = os.path.abspath(os.path.join("audio", "temp", f"sovits_{timestamp}.wav"))
                     
-                    # Create a direct patch to the get_tts_wav function
-                    # This handles the input tensor conversion directly
-                    # Replace the tts_wav_patched function in web.py with this version
-                    def tts_wav_patched(*args, **kwargs):
-                        """Safely wrap the get_tts_wav generator to handle StopIteration gracefully"""
-                        # Get the original generator
-                        result = get_tts_wav(*args, **kwargs)
-                        
-                        # Store intermediate results
-                        final_result = None
-                        
-                        def safe_wrapper():
-                            nonlocal final_result
-                            try:
-                                for item in result:
-                                    final_result = item  # Save the most recent result
-                                    yield item
-                            except Exception as e:
-                                if isinstance(e, StopIteration):
-                                    # This is normal generator behavior, not an error
-                                    if final_result:
-                                        # If we have a final result, return it
-                                        print(f"\033[92m[{time.strftime('%H:%M:%S')}] Generator completed with final result\033[0m")
-                                        yield final_result
-                                    else:
-                                        # If generator ended without producing a result, this is a real error
-                                        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Generator ended without producing a result\033[0m")
-                                        raise RuntimeError("TTS generator failed to produce any output")
-                                else:
-                                    # For other errors, log and re-raise
-                                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] TTS Error: {str(e)}\033[0m")
-                                    if "Input type" in str(e) and "weight type" in str(e):
-                                        print(f"\033[91m[ERROR] Tensor type mismatch. Please manually set all tensors to the same precision.\033[0m")
-                                    raise e
-                        
-                        return safe_wrapper()
-
-                    # Use the function as before:
-                    synthesis_result = tts_wav_patched(
+                    # Run TTS synthesis directly using get_tts_wav from inference_webui
+                    synthesis_result = get_tts_wav(
                         ref_wav_path=SOVITS_CONFIG["ref_audio"],
                         prompt_text=SOVITS_CONFIG["ref_text"],
                         prompt_language=SOVITS_CONFIG["ref_language"],
@@ -906,29 +656,14 @@ def run_tts_cli():
                         speed=float(SOVITS_CONFIG["tuning_params"]["speed_factor"]),
                         sample_steps=8  # Default for v3 models
                     )
-
-                    # Use a safer approach to extract results from the generator
-                    result_list = []
-                    try:
-                        # Process the generator one item at a time
-                        for item in synthesis_result:
-                            if item is not None:
-                                result_list.append(item)
-                            else:
-                                print(f"\033[93m[{time.strftime('%H:%M:%S')}] Warning: Received None result from TTS\033[0m")
-                    except Exception as e:
-                        print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error processing TTS results: {str(e)}\033[0m")
-                        import traceback
-                        print(f"\033[91m[{time.strftime('%H:%M:%S')}] {traceback.format_exc()}\033[0m")
-
-                    # Process the results if we have any
+                    
+                    # Get the result from the generator
+                    result_list = list(synthesis_result)
                     if result_list:
-                        last_result = result_list[-1]  # Take the last result
-                        sample_rate, audio_data = last_result
+                        sample_rate, audio_data = result_list[-1]
                         
                         # Save the output
                         import soundfile as sf
-                        print_memory_usage("On TTS output write")
                         sf.write(sovits_output, audio_data, sample_rate)
                         
                         print(f"\033[92m[{time.strftime('%H:%M:%S')}] TTS output saved to {sovits_output}\033[0m")
@@ -952,7 +687,6 @@ def run_tts_cli():
                             # Check for the timestamped output
                             if os.path.exists(final_output) and os.path.getsize(final_output) > 1000:
                                 print(f"\033[92m[{time.strftime('%H:%M:%S')}] RVC output found: {final_output}\033[0m")
-                                print_memory_usage("After RVC output")
                                 rvc_completed = True
                                 break
                             
@@ -996,7 +730,7 @@ def run_tts_cli():
                                     shutil.copy2(sovits_output, final_output)
                                     rvc_completed = True
                                 else:
-                                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] No valid TTS results produced\033[0m")
+                                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] No valid audio output found\033[0m")
 
                         # Update the latest output file
                         if rvc_completed:
@@ -1011,6 +745,10 @@ def run_tts_cli():
                             try:
                                 shutil.copy2(final_output, latest_output)
                                 print(f"\033[92m[{time.strftime('%H:%M:%S')}] Final output copied to {latest_output}\033[0m")
+                                
+                                # Only now set the completion flag
+                                print(f"\033[92m[{time.strftime('%H:%M:%S')}] Setting TTS completion flag\033[0m")
+                                tts_completed.set()
                             except Exception as e:
                                 print(f"\033[91m[{time.strftime('%H:%M:%S')}] Error copying final output: {e}\033[0m")
 
@@ -1051,6 +789,7 @@ def run_tts_cli():
 def run_rvc_cli():
     global rvc_process
     try:
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting RVC process...\033[0m")
         rvc_script_path = os.path.join(current_dir, 'rvc_cli', 'rvc_inf_cli.py')
         rvc_process = subprocess.Popen(
             [sys.executable, rvc_script_path, 'server'],
@@ -1228,7 +967,28 @@ def get_response():
         'response': None,
         'audio_ready': False
     })
-
+    
+@app.route('/test_gemini', methods=['POST'])
+def test_gemini():
+    try:
+        text_input = request.form.get('text', 'This is a test message.')
+        print(f"\033[95m[{time.strftime('%H:%M:%S')}] Testing Gemini with: {text_input}\033[0m")
+        
+        # Send directly to Gemini process
+        gemini_process.stdin.write(f"{text_input}\n")
+        gemini_process.stdin.flush()
+        
+        # Wait for response with timeout
+        output = gemini_process.stdout.readline()
+        print(f"\033[95m[{time.strftime('%H:%M:%S')}] Gemini test response: {output}\033[0m")
+        
+        return jsonify({
+            'status': 'success',
+            'input': text_input,
+            'output': output
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 @app.route('/update_tuning', methods=['POST'])
 def update_tuning():
     try:
@@ -1281,17 +1041,16 @@ def init_threads():
         while not processes_ready['tts'].is_set():
             time.sleep(0.1)
             
-        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting RVC process...\033[0m")
+        print(f"\033[94m[{time.strftime('%H:%M:%S')}] Starting other processes...\033[0m")
+        gemini_thread = threading.Thread(target=run_gemini_cli, daemon=True)
         rvc_thread = threading.Thread(target=run_rvc_cli, daemon=True)
-        rvc_thread.start()
-        threads.append(rvc_thread)
         
-        # We'll initialize the LLM client in the async part
-        print(f"\033[94m[{time.strftime('%H:%M:%S')}] LLM client will be initialized in async context\033[0m")
+        gemini_thread.start()
+        rvc_thread.start()
+        threads.extend([gemini_thread, rvc_thread])
         
         start_time = time.time()
-        # We only wait for TTS and RVC here, LLM client will be initialized later
-        while not (processes_ready['tts'].is_set() and processes_ready['rvc'].is_set()):
+        while not all(event.is_set() for event in processes_ready.values()):
             if time.time() - start_time > 45:
                 print("\033[91mTimeout waiting for processes to be ready\033[0m")
                 break
@@ -1345,10 +1104,6 @@ async def cleanup():
     """Cleanup function for graceful shutdown"""
     logger.info("Shutting down servers...")
     shutdown_event.set()
-    
-    # Disconnect LLM client
-    if llm_client:
-        await llm_client.disconnect()
 
 async def run_all():
     # Initialize all the background threads first
@@ -1356,9 +1111,6 @@ async def run_all():
     test_queues()
     time.sleep(2)
     check_process_status()
-    
-    # Initialize LLM client
-    await init_llm_client()
     
     try:
         # Run both Flask and Discord
@@ -1381,20 +1133,13 @@ if __name__ == '__main__':
         time.sleep(2)
         check_process_status()
         
-        async def startup():
-            # Initialize LLM client
-            await init_llm_client()
-            
-            # Run both servers
-            await asyncio.gather(
-                run_flask(),
-                run_discord()
-            )
-            
         try:
             # Run both servers
             logger.info("Starting servers...")
-            loop.run_until_complete(startup())
+            loop.run_until_complete(asyncio.gather(
+                run_flask(),
+                run_discord()
+            ))
         except Exception as e:
             logger.error(f"Server startup error: {str(e)}", exc_info=True)
             raise
@@ -1409,9 +1154,13 @@ if __name__ == '__main__':
             logger.info("Starting cleanup...")
             shutdown_event.set()
             
-            # Disconnect LLM client
-            if llm_client:
-                loop.run_until_complete(llm_client.disconnect())
+            # Terminate processes
+            if gemini_process:
+                gemini_process.terminate()
+                logger.info("Gemini process terminated")
+            if tts_process:
+                tts_process.terminate()
+                logger.info("TTS process terminated")
             
             # Cancel all running tasks
             tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]

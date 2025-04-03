@@ -46,10 +46,9 @@ if not path_sovits_v3 or not os.path.exists(path_sovits_v3):
 is_exist_s2gv3=os.path.exists(path_sovits_v3)
 pretrained_sovits_name=["GPT_SoVITS/pretrained_models/s2G488k.pth", "GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth",path_sovits_v3]
 pretrained_gpt_name=["GPT_SoVITS/pretrained_models/s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt","GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt", "GPT_SoVITS/pretrained_models/s1v3.ckpt"]
-
-
-
 _ =[[],[]]
+
+
 for i in range(3):
     if os.path.exists(pretrained_gpt_name[i]):_[0].append(pretrained_gpt_name[i])
     if os.path.exists(pretrained_sovits_name[i]):_[-1].append(pretrained_sovits_name[i])
@@ -90,18 +89,51 @@ is_share = eval(is_share)
 if "_CUDA_VISIBLE_DEVICES" in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["_CUDA_VISIBLE_DEVICES"]
 
-if torch.cuda.is_available():
-    device = "cuda"
+device = os.environ.get("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+dtype_str = os.environ.get("PRECISION_DTYPE", "")
+is_half_str = os.environ.get("IS_HALF", "")
+
+# Set precision based on environment variables or defaults
+if is_half_str:
+    is_half = is_half_str.lower() == "true"
 else:
-    device = "cpu"
-is_half = True
-dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-if not torch.cuda.is_available():
-    is_half = False
-    dtype = torch.float32
-# is_half=False
+    is_half = torch.cuda.is_available()
+
+# Set dtype based on environment variable or capabilities
+if dtype_str:
+    if "bfloat16" in dtype_str:
+        dtype = torch.bfloat16
+    elif "float16" in dtype_str:
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+else:
+    # Default based on hardware capability
+    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    if not torch.cuda.is_available():
+        dtype = torch.float32
 
 print(f"\033[96m[PRECISION] Using device: {device}, precision: {dtype}\033[0m")
+
+def convert_model_precision():
+    """Ensure consistent precision across all loaded models"""
+    global ssl_model, bert_model, vq_model, bigvgan_model
+    
+    # First check what precision we should use
+    target_dtype = torch.bfloat16 if "bfloat16" in str(dtype) else torch.float16
+    print(f"\033[92m[PRECISION] Converting models to {target_dtype}\033[0m")
+    
+    # Convert models
+    if ssl_model is not None:
+        for param in ssl_model.parameters():
+            param.data = param.data.to(target_dtype)
+        print(f"\033[92m[PRECISION] SSL model converted to {target_dtype}\033[0m")
+    
+    if bert_model is not None:
+        for param in bert_model.parameters():
+            param.data = param.data.to(target_dtype)
+        print(f"\033[92m[PRECISION] BERT model converted to {target_dtype}\033[0m")
+
 punctuation = set(['!', '?', '…', ',', '.', '-'," "])
 import gradio as gr
 from transformers import AutoModelForMaskedLM, AutoTokenizer
@@ -166,8 +198,8 @@ dict_language = dict_language_v1 if version =='v1' else dict_language_v2
 bigvgan_model = None  # Will be initialized when needed
 tokenizer = AutoTokenizer.from_pretrained(bert_path)
 bert_model = AutoModelForMaskedLM.from_pretrained(bert_path)
-if is_half == True:
-    bert_model = bert_model.half().to(device)
+if is_half:
+    bert_model = bert_model.to(dtype).to(device)
 else:
     bert_model = bert_model.to(device)
 
@@ -178,9 +210,40 @@ if torch.cuda.is_available():
     torch.cuda.set_per_process_memory_fraction(0.85)  # Reserve some VRAM to avoid OOM
     # Use more efficient memory allocator
     torch.backends.cudnn.benchmark = True
-    # Enable TF32 precision on Ampere+ GPUs (your RTX 4070)
+    # Enable TF32 precision on Ampere+ GPUs
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+import torch.nn.functional as F
+import importlib
+
+def fix_precision_mismatch():
+    """
+    Fix the precision mismatch by patching the torch.nn.functional.conv1d function.
+    This is a direct approach to handle the tensor type mismatch at runtime.
+    """
+    original_conv1d = F.conv1d
+    
+    def patched_conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        # Check if we need to convert input to match weight
+        if input.dtype != weight.dtype:
+            print(f"Converting input from {input.dtype} to {weight.dtype}")
+            input = input.to(weight.dtype)
+        return original_conv1d(input, weight, bias, stride, padding, dilation, groups)
+    
+    # Apply the patch
+    F.conv1d = patched_conv1d
+    print("Patched torch.nn.functional.conv1d to handle precision mismatches")
+
+# Call this function at the top level of the script
+fix_precision_mismatch()
+
+
+def ensure_tensor_dtype(tensor, target_dtype):
+    """Ensure tensor is converted to target_dtype if needed"""
+    if tensor.dtype != target_dtype:
+        return tensor.to(target_dtype)
+    return tensor
 
 def clear_gpu_cache():
     """Clear GPU cache to free up memory"""
@@ -266,10 +329,19 @@ class DictToAttrRecursive(dict):
 
 
 ssl_model = cnhubert.get_model()
-if is_half == True:
-    ssl_model = ssl_model.half().to(device)
+# First determine the target precision type
+target_dtype = torch.bfloat16 if "bfloat16" in str(dtype) else torch.float16
+if is_half:
+    # Force convert all parameters to ensure consistent precision
+    ssl_model = ssl_model.to(device)
+    for param in ssl_model.parameters():
+        param.data = param.data.to(target_dtype)
+    print(f"\033[92m[MODEL] SSL model forcibly converted to {target_dtype}\033[0m")
 else:
     ssl_model = ssl_model.to(device)
+
+torch.cuda.synchronize()
+print_memory_usage("After SSL model loading")
 
 first_param = next(ssl_model.parameters(), None)
 ssl_dtype = first_param.dtype if first_param is not None else "unknown"
@@ -353,10 +425,12 @@ def change_sovits_weights(sovits_path,prompt_language=None,text_language=None):
         try:
             del vq_model.enc_q
         except:pass
-    if is_half == True:
-        vq_model = vq_model.half().to(device)
+    if is_half:
+        vq_model = vq_model.to(dtype).to(device)
     else:
-        vq_model = vq_model.to(device)
+        vq_model = vq_model.to(device)  
+
+
     vq_model.eval()
     vq_first_param = next(vq_model.parameters(), None)
     vq_dtype = vq_first_param.dtype if vq_first_param is not None else "unknown"
@@ -406,9 +480,12 @@ def change_gpt_weights(gpt_path):
     max_sec = config["data"]["max_sec"]
     t2s_model = Text2SemanticLightningModule(config, "****", is_train=False)
     t2s_model.load_state_dict(dict_s1["weight"])
-    if is_half == True:
-        t2s_model = t2s_model.half()
-    t2s_model = t2s_model.to(device)
+    if is_half:
+        t2s_model = t2s_model.to(dtype).to(device)  # Use dtype directly
+    else:
+        t2s_model = t2s_model.to(device)
+
+
     print(f"\033[94m[MODEL] GPT model loaded with precision: {t2s_model.dtype}\033[0m")
     t2s_model.eval()
     # total = sum([param.nelement() for param in t2s_model.parameters()])
@@ -475,9 +552,10 @@ def init_bigvgan():
         
         # Set proper device and precision
         if is_half:
-            bigvgan_model = bigvgan_model.half().to(device)
+            bigvgan_model = bigvgan_model.to(dtype).to(device)  # Use dtype directly
         else:
             bigvgan_model = bigvgan_model.to(device)
+
 
         bigvgan_first_param = next(bigvgan_model.parameters(), None)
         bigvgan_dtype = bigvgan_first_param.dtype if bigvgan_first_param is not None else "unknown"
@@ -641,7 +719,18 @@ def merge_short_text_in_array(texts, threshold):
         else:
             result[len(result) - 1] += text
     return result
+def clear_gpu_cache():
+    """Clear GPU cache to free up memory"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
 
+def print_memory_usage(label=""):
+    """Print current GPU memory usage with a label"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        reserved = torch.cuda.memory_reserved() / 1024**2
+        print(f"\033[96m[MEMORY] {label} - Allocated: {allocated:.2f} MB, Reserved: {reserved:.2f} MB\033[0m")
 sr_model=None
 def audio_sr(audio,sr):
     global sr_model
@@ -686,30 +775,59 @@ def get_tts_wav(ref_wav_path, prompt_text, prompt_language, text, text_language,
     print(i18n("实际输入的目标文本:"), text)
     zero_wav = np.zeros(
         int(hps.data.sampling_rate * pause_second),
-        dtype=np.float16 if is_half == True else np.float32,
+        dtype=np.float32,  # Always start with float32
     )
     zero_wav_torch = torch.from_numpy(zero_wav)
-    if is_half == True:
-        zero_wav_torch = zero_wav_torch.half().to(device)
-    else:
-        zero_wav_torch = zero_wav_torch.to(device)
+
+    # Move to device first, then convert to the right precision
+    zero_wav_torch = zero_wav_torch.to(device)
+    if is_half:
+        model_dtype = next(ssl_model.parameters()).dtype
+        zero_wav_torch = zero_wav_torch.to(model_dtype)
+
+    print(f"Zero wav tensor dtype: {zero_wav_torch.dtype}")
+
+    # Move to device first, then convert to the right precision
+    zero_wav_torch = zero_wav_torch.to(device)
+    if is_half:
+        if "bfloat16" in str(dtype):
+            zero_wav_torch = zero_wav_torch.to(torch.bfloat16)
+        else:
+            zero_wav_torch = zero_wav_torch.to(torch.float16)
+
+    print(f"Zero wav tensor dtype: {zero_wav_torch.dtype}")
     if not ref_free:
         with torch.no_grad():
             wav16k, sr = librosa.load(ref_wav_path, sr=16000)
             if (wav16k.shape[0] > 160000 or wav16k.shape[0] < 48000):
                 gr.Warning(i18n("参考音频在3~10秒范围外，请更换！"))
                 raise OSError(i18n("参考音频在3~10秒范围外，请更换！"))
+            
+            # Create torch tensor with proper type
             wav16k = torch.from_numpy(wav16k)
-            if is_half == True:
-                wav16k = wav16k.half().to(device)
-            else:
-                wav16k = wav16k.to(device)
+            wav16k = wav16k.to(device)
+            
+            # Check the SSL model weight dtype and match it
+            model_param = next(ssl_model.parameters())
+            target_dtype = model_param.dtype
+            print(f"SSL model weight dtype: {target_dtype}")
+            
+            # Convert to the same dtype as the model weights
+            wav16k = wav16k.to(target_dtype)
+            print(f"Audio tensor converted to: {wav16k.dtype}")
+            
+            # Convert zero_wav_torch to the same type
+            zero_wav_torch = zero_wav_torch.to(target_dtype)
+            print(f"Zero pad tensor converted to: {zero_wav_torch.dtype}")
+            
             wav16k = torch.cat([wav16k, zero_wav_torch])
+            
+            # Extract SSL features
             ssl_content = ssl_model.model(wav16k.unsqueeze(0))[
                 "last_hidden_state"
             ].transpose(
                 1, 2
-            )  # .float()
+            )
             codes = vq_model.extract_latent(ssl_content)
             prompt_semantic = codes[0, 0]
             prompt = prompt_semantic.unsqueeze(0).to(device)
@@ -1092,12 +1210,10 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
         with gr.Row():
             inference_button = gr.Button(i18n("合成语音"), variant="primary", size='lg', scale=25)
             output = gr.Audio(label=i18n("输出的语音"), scale=14)
-        print_memory_usage("Before TTS synthesis")
         inference_button.click(
             get_tts_wav,
             [inp_ref, prompt_text, prompt_language, text, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free,speed,if_freeze,inp_refs,sample_steps,if_sr_Checkbox,pause_second_slider],
             [output],
-            print_memory_usage("After TTS synthesis")
         )
         SoVITS_dropdown.change(change_sovits_weights, [SoVITS_dropdown,prompt_language,text_language], [prompt_language,text_language,prompt_text,prompt_language,text,text_language,sample_steps,inp_refs,ref_text_free,if_sr_Checkbox])
         GPT_dropdown.change(change_gpt_weights, [GPT_dropdown], [])

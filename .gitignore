@@ -104,3 +104,4 @@ cfg.py
 *.pt
 *.pth
 *.gguf
+./cfg.py
